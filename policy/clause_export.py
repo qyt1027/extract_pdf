@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
+from core.unit_aliases import applicable_unit_paths, normalize_applicable_units
 
 
 def build_batch_clause_structure(
@@ -37,6 +39,8 @@ def build_batch_clause_structure(
         "source_page_start",
         "source_page_end",
         "structure_version",
+        "applicable_unit", "issuing_department", "doc_number_raw", "issue_date", "issue_month",
+        "effective_date", "expiry_date", "validity_status", "version", "parse_quality", "structure_status",
     )
     for document in sorted(
         documents,
@@ -48,12 +52,19 @@ def build_batch_clause_structure(
             key=lambda item: (int(item.get("sequence_no") or 0), str(item.get("clause_id") or "")),
         )
         exported_document = {
-            field: document.get(field) if document.get(field) is not None else ""
+            field: (document[field].isoformat() if isinstance(document.get(field), (date, datetime))
+                    else document.get(field) if document.get(field) is not None else "")
             for field in document_fields
         }
+        # 兼容旧字段名称，避免文号已保存却在导出别名中显示为空。
+        exported_document["document_no"] = document.get("document_no") or document.get("doc_number") or ""
+        exported_document["doc_number"] = document.get("doc_number") or document.get("document_no") or ""
+        exported_document["applicable_unit"] = normalize_applicable_units(document.get("applicable_unit"))
+        exported_document["applicable_unit_paths"] = applicable_unit_paths(exported_document["applicable_unit"])
         exported_document["clauses"] = [
             {
-                field: list(clause.get(field) or []) if field == "chapter_path" else clause.get(field) or ""
+                field: list(clause.get(field) or []) if field == "chapter_path"
+                else clause.get(field) if clause.get(field) is not None else ""
                 for field in clause_fields
             }
             for clause in clauses
@@ -70,7 +81,7 @@ def export_file_clause_structure(
 ) -> Path:
     """导出单文件的当前制度结构，保留父子关系和原文。"""
     if document_loader is None or clause_loader is None:
-        from policy.storage import get_policy_documents_for_file, get_policy_clauses
+        from .storage import get_policy_documents_for_file, get_policy_clauses
         document_loader = document_loader or get_policy_documents_for_file
         clause_loader = clause_loader or get_policy_clauses
     document = document_loader(str(file_id))
@@ -92,7 +103,7 @@ def export_batch_clause_structure(
 ) -> Path:
     """导出批次内所有已完成制度的条款重组结果。"""
     if document_loader is None or clause_loader is None:
-        from policy.storage import get_policy_clauses, get_policy_documents_for_batch
+        from .storage import get_policy_clauses, get_policy_documents_for_batch
 
         document_loader = document_loader or get_policy_documents_for_batch
         clause_loader = clause_loader or get_policy_clauses

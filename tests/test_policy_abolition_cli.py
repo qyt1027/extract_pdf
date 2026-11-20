@@ -7,7 +7,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from models import ProcessingResult, ProcessingStatus
+from core.models import ProcessingResult, ProcessingStatus
 
 
 # 存储模块导入时需要完整配置；本测试全部替换数据库访问。
@@ -184,10 +184,10 @@ class PolicyAbolitionCliTests(unittest.TestCase):
         })()
         with (
             patch("fitz.open", return_value=fake_document),
-            patch("pipeline.process_pdf", return_value=result) as process,
+            patch('processing.pipeline.process_pdf', return_value=result) as process,
             patch("policy.clause_export.export_file_clause_structure") as export,
         ):
-            from main import run_process
+            from commands.handlers import run_process
             run_process("policy.pdf")
 
         self.assertIsNotNone(process.call_args.kwargs["abolition_confirmation"])

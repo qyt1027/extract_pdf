@@ -1,8 +1,8 @@
 # parsers/__init__.py
-from parsers.dispatcher import PDFParser
-from parsers.base import ParserStrategy
-from parsers.cloud_mineru import CloudMineruParser
-from parsers.pymupdf_parser import PyMuPDFParser
+from .base import ParserStrategy
+from .cloud_mineru import CloudMineruParser
+from .dispatcher import PDFParser
+from .pymupdf_parser import PyMuPDFParser
 
 __all__ = [
     "PDFParser",

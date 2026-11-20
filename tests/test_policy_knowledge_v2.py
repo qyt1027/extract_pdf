@@ -1,10 +1,10 @@
-import unittest
-from unittest.mock import patch
+import os
 import subprocess
 import sys
-import os
 import tempfile
+import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import policy.retrieval
 
@@ -21,7 +21,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertIn("--policy-knowledge-v2-status", result.stdout)
 
     def test_context_keeps_parent_and_siblings_addressable(self) -> None:
-        from policy.knowledge_v2 import build_clause_context
+        from policy.knowledge_v2.logic import build_clause_context
 
         clauses = [
             {"clause_id": "p", "level": "article", "raw_text": "第六条 申请程序如下：", "sequence_no": 1},
@@ -37,7 +37,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertIsNone(context["previous"])
 
     def test_context_ancestor_depth_controls_visible_levels(self) -> None:
-        from policy.knowledge_v2 import build_clause_context
+        from policy.knowledge_v2.logic import build_clause_context
 
         clauses = [
             {"clause_id": "chapter", "raw_text": "第二章 公文种类", "sequence_no": 1},
@@ -56,7 +56,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual([item["clause_id"] for item in two["ancestors"]], ["article", "chapter"])
 
     def test_prompt_specifies_complete_assertion_shape_and_evidence_boundary(self) -> None:
-        from policy.knowledge_v2 import build_assertion_prompt
+        from policy.knowledge_v2.logic import build_assertion_prompt
 
         prompt = build_assertion_prompt({"current": {"clause_id": "c1", "text": "申请人提交材料。"}})
 
@@ -66,7 +66,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertIn("当前条款或明确标识的上下文条款", prompt)
 
     def test_validation_rejects_evidence_position_mismatch(self) -> None:
-        from policy.knowledge_v2 import validate_assertion
+        from policy.knowledge_v2.logic import validate_assertion
 
         clause = {"clause_id": "c1", "raw_text": "申请人应提交申请表。"}
         payload = {
@@ -84,7 +84,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
             validate_assertion(payload, {"c1": clause})
 
     def test_validation_rejects_endpoint_not_supported_by_evidence(self) -> None:
-        from policy.knowledge_v2 import validate_assertion
+        from policy.knowledge_v2.logic import validate_assertion
 
         clause = {"clause_id": "c1", "raw_text": "申请人应提交申请表。"}
         payload = {
@@ -102,7 +102,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
             validate_assertion(payload, {"c1": clause})
 
     def test_validation_accepts_context_inferred_subject_with_source_evidence(self) -> None:
-        from policy.knowledge_v2 import validate_assertion
+        from policy.knowledge_v2.logic import validate_assertion
 
         clauses = {
             "parent": {"clause_id": "parent", "raw_text": "申请人办理程序如下："},
@@ -125,7 +125,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertTrue(result["subject"]["inferred_from_context"])
 
     def test_validation_rejects_qualifier_not_supported_by_evidence(self) -> None:
-        from policy.knowledge_v2 import validate_assertion
+        from policy.knowledge_v2.logic import validate_assertion
 
         clause = {"clause_id": "c1", "raw_text": "申请人应提交申请表"}
         payload = {
@@ -143,13 +143,13 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
             validate_assertion(payload, {"c1": clause})
 
     def test_invalid_kind_reports_modality_confusion(self) -> None:
-        from policy.knowledge_v2 import validate_assertion
+        from policy.knowledge_v2.logic import validate_assertion
 
         with self.assertRaisesRegex(ValueError, "prohibited.*规范模态.*action"):
             validate_assertion({"kind": "prohibited", "modality": "prohibited"}, {})
 
     def test_normalization_repairs_only_unique_exact_evidence_position(self) -> None:
-        from policy.knowledge_v2 import normalize_assertions
+        from policy.knowledge_v2.logic import normalize_assertions
 
         raw = "第一条 申请人应提交申请表。"
         clause = {"clause_id": "c1", "raw_text": raw}
@@ -170,7 +170,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertIn("证据文本与字符位置不一致", invalid[0]["error"])
 
     def test_review_rows_show_validation_error(self) -> None:
-        from policy.knowledge_review_v2 import build_assertion_review_rows
+        from policy.knowledge_v2.review import build_assertion_review_rows
 
         rows = build_assertion_review_rows("r1", [{"assertion_id": "a1", "clause_id": "c1", "status": "invalid", "error": "证据文本与字符位置不一致"}])
         self.assertEqual(rows[0]["无效原因"], "证据文本与字符位置不一致")
@@ -189,7 +189,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertIn("assert_type=scope", rows[0]["error"])
 
     def test_duplicate_assertions_keep_one_record(self) -> None:
-        from policy.knowledge_v2 import normalize_assertions
+        from policy.knowledge_v2.logic import normalize_assertions
 
         clause = {"clause_id": "c1", "raw_text": "申请人应提交申请表。"}
         item = {
@@ -209,7 +209,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(invalid, [])
 
     def test_explicit_heading_builds_matter_and_workflow_without_claiming_order(self) -> None:
-        from policy.knowledge_v2 import build_explicit_matters, build_workflow_view
+        from policy.knowledge_v2.logic import build_explicit_matters, build_workflow_view
 
         clauses = [
             {"clause_id": "h", "level": "section", "raw_text": "第二节 兼职申请办理程序", "sequence_no": 1, "chapter_path": ["第二章"]},
@@ -231,7 +231,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual([step["assertion_id"] for step in workflow["steps"]], ["e1", "e2"])
 
     def test_heading_without_process_goal_does_not_build_matter(self) -> None:
-        from policy.knowledge_v2 import build_explicit_matters
+        from policy.knowledge_v2.logic import build_explicit_matters
 
         clauses = [
             {"clause_id": "h", "level": "chapter", "raw_text": "第一章 总则", "sequence_no": 1},
@@ -241,7 +241,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(build_explicit_matters("run1", "policy1", clauses, []), [])
 
     def test_explicit_subheadings_split_parent_container_without_overlap(self) -> None:
-        from policy.knowledge_v2 import build_explicit_matters
+        from policy.knowledge_v2.logic import build_explicit_matters
 
         clauses = [
             {"clause_id": "chapter", "level": "chapter", "raw_text": "第二章 申请办理", "sequence_no": 1},
@@ -261,20 +261,20 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(matters[0]["clause_ids"], ["first", "a"])
 
     def test_model_response_must_be_json_object_with_assertion_array(self) -> None:
-        from policy.knowledge_runner_v2 import parse_assertion_response
+        from policy.knowledge_v2.runner import parse_assertion_response
 
         with self.assertRaisesRegex(ValueError, "assertions"):
             parse_assertion_response('{"items": []}')
 
     def test_resume_retries_interrupted_running_item(self) -> None:
-        from policy.knowledge_runner_v2 import should_process_knowledge_item
+        from policy.knowledge_v2.runner import should_process_knowledge_item
 
         self.assertTrue(should_process_knowledge_item({"status": "running"}, resume=True))
         self.assertFalse(should_process_knowledge_item({"status": "running"}, resume=False))
         self.assertFalse(should_process_knowledge_item({"status": "succeeded"}, resume=True))
 
     def test_extract_clause_returns_valid_and_invalid_candidates_separately(self) -> None:
-        from policy.knowledge_runner_v2 import extract_clause_assertions
+        from policy.knowledge_v2.runner import extract_clause_assertions
 
         clause = {"clause_id": "c1", "level": "article", "raw_text": "申请人应提交申请表。", "sequence_no": 1}
         document = {"title": "申请管理办法"}
@@ -308,7 +308,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(invalid[0]["status"], "invalid")
 
     def test_non_substantive_heading_skips_model_call(self) -> None:
-        from policy.knowledge_runner_v2 import extract_clause_assertions
+        from policy.knowledge_v2.runner import extract_clause_assertions
 
         called = False
 
@@ -324,7 +324,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual((valid, invalid), ([], []))
 
     def test_document_type_list_builds_scope_assertions_with_exact_item_evidence(self) -> None:
-        from policy.knowledge_v2 import extract_document_type_item
+        from policy.knowledge_v2.logic import extract_document_type_item
 
         parent = {"clause_id": "p", "level": "article", "raw_text": "第七条 学校公文种类包括："}
         examples = [
@@ -357,14 +357,14 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
                 self.assertNotIn("\n3", evidence["text"])
 
     def test_document_type_rule_does_not_capture_unrelated_suitability_clause(self) -> None:
-        from policy.knowledge_v2 import extract_document_type_item
+        from policy.knowledge_v2.logic import extract_document_type_item
 
         parent = {"clause_id": "p", "raw_text": "第七条 报销条件如下："}
         clause = {"clause_id": "c", "level": "item", "raw_text": "（一） 请示。适用于报销审批。"}
         self.assertIsNone(extract_document_type_item(clause, parent))
 
     def test_batch_skips_model_for_document_type_items(self) -> None:
-        from policy.knowledge_runner_v2 import extract_clause_batch_assertions
+        from policy.knowledge_v2.runner import extract_clause_batch_assertions
 
         parent = {"clause_id": "p", "level": "article", "raw_text": "第七条 学校公文种类包括：", "sequence_no": 1}
         item = {"clause_id": "c", "level": "item", "parent_clause_id": "p", "raw_text": "（八） 请示。适用于向上级单位请求指示、批准。", "sequence_no": 2}
@@ -374,7 +374,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(result[0][0][0]["category"]["source_clause_id"], "p")
 
     def test_document_type_index_contains_parent_category_and_item_usage(self) -> None:
-        from policy.knowledge_retrieval_v2 import assertion_index_text
+        from policy.knowledge_v2.retrieval import assertion_index_text
 
         assertion = {"kind": "scope", "subject": {"text": "请示"}, "predicate": {"text": "适用于"},
                      "object": {"text": "向上级单位请求指示、批准"}, "category": {"text": "学校公文种类", "source_clause_id": "p"}}
@@ -384,7 +384,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertIn("请求指示", text)
 
     def test_document_type_graph_exports_contains_and_usage_edges(self) -> None:
-        from policy.knowledge_v2 import build_document_type_graph, extract_document_type_item
+        from policy.knowledge_v2.logic import build_document_type_graph, extract_document_type_item
 
         parent = {"clause_id": "p", "policy_id": "policy", "level": "article", "raw_text": "第七条 学校公文种类包括："}
         child = {"clause_id": "c", "policy_id": "policy", "parent_clause_id": "p", "level": "item",
@@ -411,7 +411,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
     def test_connection_failure_stops_batch_without_single_item_retries(self) -> None:
         import httpx
         from openai import APIConnectionError
-        from policy.knowledge_runner_v2 import extract_batch_with_fallback
+        from policy.knowledge_v2.runner import extract_batch_with_fallback
 
         error = APIConnectionError(request=httpx.Request("POST", "http://127.0.0.1:11434/v1/chat/completions"))
         single_calls = []
@@ -426,7 +426,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
     def test_run_reports_model_connection_failure_and_keeps_items_resumable(self) -> None:
         import httpx
         from openai import APIConnectionError
-        from policy.knowledge_runner_v2 import run_knowledge_extraction_v2
+        from policy.knowledge_v2.runner import run_knowledge_extraction_v2
 
         updates = []
         run_updates = []
@@ -440,7 +440,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
             patch("policy.storage.get_policy_knowledge_items_v2", return_value=[{"item_id": "i", "clause_id": "c", "status": "pending"}]),
             patch("policy.storage.get_policy_clause", return_value=clause),
             patch("policy.storage.update_policy_knowledge_item_v2", side_effect=lambda _, data: updates.append(data)),
-            patch("policy.knowledge_runner_v2.extract_clause_batch_assertions", side_effect=error),
+            patch("policy.knowledge_v2.runner.extract_clause_batch_assertions", side_effect=error),
         ):
             with self.assertRaisesRegex(RuntimeError, "模型服务连接失败.*r.*resume-policy-knowledge-v2"):
                 run_knowledge_extraction_v2("r")
@@ -449,7 +449,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(run_updates[-1]["status"], "connection_failed")
 
     def test_batch_extraction_handles_multiple_target_clauses_in_one_call(self) -> None:
-        from policy.knowledge_runner_v2 import extract_clause_batch_assertions
+        from policy.knowledge_v2.runner import extract_clause_batch_assertions
 
         clauses = [
             {"clause_id": "c1", "policy_id": "p1", "level": "article", "raw_text": "申请人提交申请表", "sequence_no": 1},
@@ -484,7 +484,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual([item[0][0]["predicate"]["text"] for item in result], ["提交", "审核"])
 
     def test_batch_failure_falls_back_to_each_clause(self) -> None:
-        from policy.knowledge_runner_v2 import extract_batch_with_fallback
+        from policy.knowledge_v2.runner import extract_batch_with_fallback
 
         requests = [("c1",), ("c2",)]
         result = extract_batch_with_fallback(
@@ -496,7 +496,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(result, ["single-c1", "single-c2"])
 
     def test_invalid_batch_item_retries_singly_without_hiding_original_failure(self) -> None:
-        from policy.knowledge_runner_v2 import retry_invalid_batch_items
+        from policy.knowledge_v2.runner import retry_invalid_batch_items
 
         requests = [("c1",), ("c2",)]
         invalid = ([], [{"status": "invalid", "error": "断言 kind 非法"}])
@@ -507,7 +507,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(result[0], invalid)
 
     def test_feedback_retry_reextracts_missing_predicate_with_original_evidence(self) -> None:
-        from policy.knowledge_runner_v2 import retry_clause_assertions_with_feedback
+        from policy.knowledge_v2.runner import retry_clause_assertions_with_feedback
 
         clause = {"clause_id": "c1", "level": "article", "raw_text": "本办法所指放射性同位素包括放射源。", "sequence_no": 1}
         invalid = ([], [{"status": "invalid", "error": "predicate 必须包含非空 text", "payload": {"kind": "definition", "predicate": None}}])
@@ -528,7 +528,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertIn("predicate 必须包含非空 text", prompts[0])
 
     def test_progress_text_includes_speed_and_remaining_time(self) -> None:
-        from policy.knowledge_runner_v2 import format_extraction_progress
+        from policy.knowledge_v2.runner import format_extraction_progress
 
         text = format_extraction_progress(2, 10, 4.0)
 
@@ -537,7 +537,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertIn("预计剩余 16 秒", text)
 
     def test_assertion_matches_boost_existing_clause_without_becoming_citation(self) -> None:
-        from policy.knowledge_retrieval_v2 import merge_assertion_matches
+        from policy.knowledge_v2.retrieval import merge_assertion_matches
 
         candidates = [
             {"id": "c1", "similarity": 0.70, "score": 0.70, "metadata": {"clause_id": "c1", "raw_text": "申请人提交申请表"}},
@@ -553,7 +553,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertNotIn("raw_text", info["matched_assertions"][0])
 
     def test_no_assertion_match_preserves_clause_order_and_mode(self) -> None:
-        from policy.knowledge_retrieval_v2 import merge_assertion_matches
+        from policy.knowledge_v2.retrieval import merge_assertion_matches
 
         candidates = [
             {"id": "c1", "score": 0.8, "metadata": {"clause_id": "c1"}},
@@ -566,9 +566,9 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(info["retrieval_mode"], "clause_only")
 
     def test_empty_assertion_index_does_not_load_embedding_model(self) -> None:
-        from policy.knowledge_retrieval_v2 import search_assertions_v2
+        from policy.knowledge_v2.retrieval import search_assertions_v2
 
-        with patch("storage_adapter.storage.vector.count_vectors", return_value=0), patch(
+        with patch('storage.adapters.storage.vector.count_vectors', return_value=0), patch(
             "policy.retrieval._encode_policy_clause_texts"
         ) as encoder:
             with self.assertRaisesRegex(RuntimeError, "索引为空"):
@@ -576,7 +576,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         encoder.assert_not_called()
 
     def test_assertion_index_replaces_old_vectors_for_same_policy(self) -> None:
-        from policy.knowledge_retrieval_v2 import sync_assertion_index_v2
+        from policy.knowledge_v2.retrieval import sync_assertion_index_v2
 
         assertions = [{
             "assertion_id": "a1", "run_id": "new", "policy_id": "p1", "clause_id": "c1",
@@ -587,7 +587,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
             "policy.storage.get_policy_assertions_v2", return_value=assertions
         ), patch(
             "policy.retrieval._encode_policy_clause_texts", return_value=[[0.1, 0.2]]
-        ), patch("storage_adapter.storage.vector") as vector:
+        ), patch('storage.adapters.storage.vector') as vector:
             vector.insert_vectors.return_value = 1
             count = sync_assertion_index_v2("new")
 
@@ -595,7 +595,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         vector.delete_vectors_by_metadata.assert_any_call("policy_assertion_search_v2", "policy_id", "p1")
 
     def test_matching_assertion_resolves_explicit_matter_and_workflow_summary(self) -> None:
-        from policy.knowledge_retrieval_v2 import resolve_match_context
+        from policy.knowledge_v2.retrieval import resolve_match_context
 
         matches = [{"run_id": "r1", "clause_id": "a"}]
         matters = [{"matter_id": "m1", "name": "兼职申请程序", "policy_id": "p1", "clause_ids": ["h", "a"]}]
@@ -608,7 +608,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(context["workflow_summary"]["workflow_type"], "partial_workflow")
 
     def test_review_rows_keep_machine_fields_and_blank_human_decision(self) -> None:
-        from policy.knowledge_review_v2 import build_assertion_review_rows
+        from policy.knowledge_v2.review import build_assertion_review_rows
 
         rows = build_assertion_review_rows("run1", [{
             "assertion_id": "a1", "clause_id": "c1", "kind": "action", "modality": "required",
@@ -621,7 +621,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(rows[0]["人工结论"], "")
 
     def test_review_row_shows_parent_category_for_document_type(self) -> None:
-        from policy.knowledge_review_v2 import build_assertion_review_rows
+        from policy.knowledge_v2.review import build_assertion_review_rows
 
         rows = build_assertion_review_rows("r1", [{
             "assertion_id": "a1", "clause_id": "c1", "kind": "scope", "modality": "factual",
@@ -633,7 +633,7 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(rows[0]["类别来源条款ID"], "p")
 
     def test_workflow_export_contains_matter_and_citable_steps(self) -> None:
-        from policy.knowledge_review_v2 import export_knowledge_view_v2
+        from policy.knowledge_v2.review import export_knowledge_view_v2
 
         matter = {"matter_id": "m1", "name": "申请程序", "clause_ids": ["h", "a"], "policy_id": "p1"}
         clauses = [{"clause_id": "h", "sequence_no": 1}, {"clause_id": "a", "sequence_no": 2}]
@@ -650,8 +650,8 @@ class PolicyKnowledgeV2Tests(unittest.TestCase):
         self.assertEqual(payload["matters"][0]["workflow"]["steps"][0]["clause_id"], "a")
 
     def test_view_export_includes_grouped_document_type_graph_without_matters(self) -> None:
-        from policy.knowledge_review_v2 import export_knowledge_view_v2
-        from policy.knowledge_v2 import extract_document_type_item
+        from policy.knowledge_v2.review import export_knowledge_view_v2
+        from policy.knowledge_v2.logic import extract_document_type_item
 
         parent = {"clause_id": "p", "policy_id": "policy", "raw_text": "第七条 学校公文种类包括："}
         child = {"clause_id": "c", "policy_id": "policy", "parent_clause_id": "p", "level": "item",

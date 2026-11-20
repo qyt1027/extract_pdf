@@ -1,15 +1,20 @@
 """通过真实 SQL 验证重置时的跨制度一致性及事务回滚。"""
-import sqlite3
 import hashlib
+import json
+import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timedelta
 from contextlib import contextmanager
-from types import SimpleNamespace
+from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from file_reset import load_folder_reset_plan, reset_file_database_artifacts, reset_folder_database_artifacts
+from processing.reset import (
+    load_folder_reset_plan,
+    reset_file_database_artifacts,
+    reset_folder_database_artifacts,
+)
 
 
 class MissingTable(Exception):
@@ -43,9 +48,14 @@ class SqlStorage:
         ''')
 
     def execute(self, sql, params=()):
+        # SQLite 替身不实现 PostgreSQL 事务咨询锁。
+        if sql.startswith("SELECT pg_advisory_xact_lock"):
+            return None
         try:
             return self.conn.execute(sql.replace("%s", "?"),
-                                     tuple(value.isoformat() if isinstance(value, datetime) else value for value in params))
+                                     tuple(value.isoformat() if isinstance(value, datetime)
+                                           else json.dumps(value) if isinstance(value, list) else value
+                                           for value in params))
         except sqlite3.OperationalError as error:
             if "no such table" in str(error):
                 raise MissingTable(str(error)) from error
@@ -87,7 +97,7 @@ class ResetConsistencyTests(unittest.TestCase):
         self.db.execute("UPDATE policy_documents SET structure_status='running' WHERE policy_id='a'")
         self.db.execute("INSERT INTO pdf_batch_items VALUES ('pdf_a',NULL,'running')")
         plan = {**self.folder_plan(), "running_file_ids": ["pdf_a"]}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             result = reset_folder_database_artifacts("folder", confirm=True, release_stale=True, purge=True)
         self.assertTrue(result['force'])
         self.assertEqual(result['reset_file_ids'], ['pdf_a'])
@@ -100,7 +110,7 @@ class ResetConsistencyTests(unittest.TestCase):
         self.db.execute("UPDATE policy_knowledge_items_v2 SET started_at=NULL")
         self.db.execute("UPDATE pdf_files SET status='processing',last_attempt_at=NULL WHERE file_id='pdf_a'")
         plan = {**self.folder_plan(), "running_file_ids": ["pdf_a"]}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             reset_folder_database_artifacts('folder',purge=True)
             self.assertEqual(self.db.query('pdf_files', "file_id='pdf_a'")[0]['status'],'processing')
             reset_folder_database_artifacts('folder',confirm=True,purge=True)
@@ -114,7 +124,7 @@ class ResetConsistencyTests(unittest.TestCase):
             if table == 'pdf_files':
                 raise RuntimeError('模拟失败')
             return original(table,*args)
-        with patch("file_reset.load_folder_reset_plan",return_value=self.folder_plan()), patch.object(self.db,'update_rows',side_effect=fail):
+        with patch('processing.reset.load_folder_reset_plan',return_value=self.folder_plan()), patch.object(self.db,'update_rows',side_effect=fail):
             with self.assertRaises(RuntimeError):
                 reset_folder_database_artifacts('folder',confirm=True,purge=True)
         self.assertEqual(self.db.query('pdf_batch_items')[0]['status'],'running')
@@ -136,7 +146,7 @@ class ResetConsistencyTests(unittest.TestCase):
 
     def test_stale_knowledge_task_is_released_only_with_explicit_flag(self):
         self.add_knowledge_task()
-        with patch("file_reset.load_folder_reset_plan", return_value=self.folder_plan()):
+        with patch('processing.reset.load_folder_reset_plan', return_value=self.folder_plan()):
             with self.assertRaisesRegex(ValueError, "条款任务"):
                 reset_folder_database_artifacts("folder", confirm=True)
             result = reset_folder_database_artifacts("folder", confirm=True, release_stale=True)
@@ -148,7 +158,7 @@ class ResetConsistencyTests(unittest.TestCase):
         self.add_knowledge_task()
         self.db.execute("INSERT INTO policy_knowledge_items_v2 VALUES ('c1','old_run','succeeded',NULL,%s,'')",
                         (datetime.now().isoformat(),))
-        with patch("file_reset.load_folder_reset_plan", return_value=self.folder_plan()):
+        with patch('processing.reset.load_folder_reset_plan', return_value=self.folder_plan()):
             with self.assertRaisesRegex(ValueError, "近期|正在处理"):
                 reset_folder_database_artifacts("folder", confirm=True, release_stale=True)
         self.assertEqual(len(self.db.query("policy_clauses")), 3)
@@ -156,7 +166,7 @@ class ResetConsistencyTests(unittest.TestCase):
     def test_unknown_task_time_is_not_released(self):
         self.add_knowledge_task()
         self.db.execute("UPDATE policy_knowledge_items_v2 SET started_at=NULL")
-        with patch("file_reset.load_folder_reset_plan", return_value=self.folder_plan()):
+        with patch('processing.reset.load_folder_reset_plan', return_value=self.folder_plan()):
             with self.assertRaises(ValueError):
                 reset_folder_database_artifacts("folder", confirm=True, release_stale=True)
 
@@ -168,15 +178,17 @@ class ResetConsistencyTests(unittest.TestCase):
 
     def test_purge_removes_old_metadata_incoming_relations_and_empty_runs(self):
         self.add_knowledge_task()
-        for field in ('title TEXT', 'doc_number TEXT', 'effective_date TEXT', 'family_id TEXT', 'current_extraction_run_id TEXT'):
+        for field in ('title TEXT', 'doc_number TEXT', 'effective_date TEXT', 'family_id TEXT', 'current_extraction_run_id TEXT', 'applicable_unit TEXT'):
             self.db.execute('ALTER TABLE policy_documents ADD COLUMN ' + field)
         self.db.execute("UPDATE policy_documents SET title='旧标题',doc_number='旧文号',effective_date='2024-01-01',family_id='old',current_extraction_run_id='old_run' WHERE policy_id='a'")
+        self.db.execute("UPDATE policy_documents SET applicable_unit='计算机学院' WHERE policy_id='a'")
         self.db.execute("INSERT INTO policy_document_relations VALUES ('ca','c','a','c1','approved','2025-01-01')")
         self.db.execute("INSERT INTO policy_family_candidates (candidate_id,source_policy_id,target_policy_id) VALUES ('ca_title','c','a')")
-        with patch("file_reset.load_folder_reset_plan", return_value=self.folder_plan()):
+        with patch('processing.reset.load_folder_reset_plan', return_value=self.folder_plan()):
             reset_folder_database_artifacts("folder", confirm=True, release_stale=True, purge=True)
         doc = self.db.query("policy_documents", "policy_id='a'")[0]
         self.assertEqual((doc['title'],doc['doc_number'],doc['effective_date'],doc['family_id'],doc['current_extraction_run_id']), ('','',None,None,None))
+        self.assertEqual(json.loads(doc['applicable_unit']), [])
         self.assertEqual(self.db.query("policy_document_relations"), [])
         self.assertEqual(self.db.query("policy_knowledge_runs_v2"), [])
         self.assertEqual(self.db.query("policy_family_candidates"), [])
@@ -184,7 +196,7 @@ class ResetConsistencyTests(unittest.TestCase):
 
     def test_purge_preview_does_not_release_tasks_or_delete_artifacts(self):
         self.add_knowledge_task()
-        with patch("file_reset.load_folder_reset_plan", return_value=self.folder_plan()):
+        with patch('processing.reset.load_folder_reset_plan', return_value=self.folder_plan()):
             result = reset_folder_database_artifacts("folder", release_stale=True, purge=True)
         self.assertTrue(result["purge"])
         self.assertTrue(result["force"])
@@ -193,8 +205,8 @@ class ResetConsistencyTests(unittest.TestCase):
 
     def test_cleanup_failure_rolls_back_stale_clause_run_release(self):
         self.add_knowledge_task()
-        with patch("file_reset.load_folder_reset_plan", return_value=self.folder_plan()), patch(
-            "file_reset.reset_file_database_artifacts", side_effect=RuntimeError("清理失败")
+        with patch('processing.reset.load_folder_reset_plan', return_value=self.folder_plan()), patch(
+            'processing.reset.reset_file_database_artifacts', side_effect=RuntimeError("清理失败")
         ):
             with self.assertRaises(RuntimeError):
                 reset_folder_database_artifacts("folder", confirm=True, release_stale=True)
@@ -206,7 +218,7 @@ class ResetConsistencyTests(unittest.TestCase):
         self.db.execute("UPDATE policy_knowledge_runs_v2 SET status='succeeded'")
         self.db.execute("UPDATE policy_knowledge_items_v2 SET status='succeeded'")
         self.db.execute("INSERT INTO policy_knowledge_items_v2 VALUES ('c1','old_run','succeeded',NULL,NULL,'')")
-        with patch("file_reset.load_folder_reset_plan", return_value=self.folder_plan()):
+        with patch('processing.reset.load_folder_reset_plan', return_value=self.folder_plan()):
             reset_folder_database_artifacts("folder", confirm=True, purge=True)
         self.assertEqual(len(self.db.query("policy_knowledge_runs_v2")), 1)
         self.assertEqual(self.db.query("policy_knowledge_items_v2")[0]["clause_id"], "c1")
@@ -214,7 +226,7 @@ class ResetConsistencyTests(unittest.TestCase):
     def setUp(self):
         self.db = SqlStorage()
         self.storage = SimpleNamespace(relational=self.db, vector=SimpleNamespace(delete_vectors_by_metadata=lambda *args: 0))
-        self.patcher = patch("file_reset.storage", self.storage)
+        self.patcher = patch('processing.reset.storage', self.storage)
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
         self.addCleanup(self.db.conn.close)
@@ -270,7 +282,7 @@ class ResetConsistencyTests(unittest.TestCase):
 
     def test_shared_override_allows_completed_file_reset(self):
         plan = {"file_ids": ["pdf_a"], "shared_file_ids": ["pdf_a"], "running_file_ids": []}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             result = reset_folder_database_artifacts("folder", confirm=True, allow_shared=True)
         self.assertEqual(result["reset_file_ids"], ["pdf_a"])
         self.assertEqual(self.db.query("pdf_files", "file_id='pdf_a'")[0]["status"], "pending")
@@ -278,7 +290,7 @@ class ResetConsistencyTests(unittest.TestCase):
     def test_shared_override_blocks_active_batch_owner(self):
         self.db.execute("INSERT INTO pdf_batch_items VALUES ('pdf_a',NULL,'running')")
         plan = {"file_ids": ["pdf_a"], "shared_file_ids": ["pdf_a"], "running_file_ids": []}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             with self.assertRaisesRegex(ValueError, "正在处理"):
                 reset_folder_database_artifacts("folder", confirm=True, allow_shared=True)
         self.assertEqual(len(self.db.query("policy_clauses")), 3)
@@ -292,7 +304,7 @@ class ResetConsistencyTests(unittest.TestCase):
     def test_folder_failure_rolls_back_previous_files(self):
         self.db.execute("UPDATE pdf_files SET status='processing' WHERE file_id='pdf_b'")
         plan = {"file_ids": ["pdf_a", "pdf_b"], "shared_file_ids": [], "running_file_ids": []}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             with self.assertRaises(ValueError):
                 reset_folder_database_artifacts("folder", confirm=True)
         self.assertEqual(len(self.db.query("policy_document_relations")), 1)
@@ -335,7 +347,7 @@ class ResetConsistencyTests(unittest.TestCase):
 
     def test_shared_reset_requires_explicit_override(self):
         plan = {"file_ids": ["pdf_a"], "shared_file_ids": ["pdf_a"], "running_file_ids": []}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             with self.assertRaisesRegex(ValueError, "allow-shared-reset"):
                 reset_folder_database_artifacts("folder", confirm=True)
         self.assertEqual(len(self.db.query("policy_clauses")), 3)
@@ -378,7 +390,7 @@ class ResetConsistencyTests(unittest.TestCase):
         self.db.execute("UPDATE pdf_files SET status='processing',last_attempt_at=%s WHERE file_id='pdf_a'",
                         ((datetime.now() - timedelta(days=2)).isoformat(),))
         plan = {"file_ids": ["pdf_a"], "shared_file_ids": [], "running_file_ids": ["pdf_a"], "stale_file_ids": ["pdf_a"]}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             with self.assertRaises(ValueError):
                 reset_folder_database_artifacts("folder", confirm=True)
             preview = reset_folder_database_artifacts("folder", release_stale=True)
@@ -392,7 +404,7 @@ class ResetConsistencyTests(unittest.TestCase):
         self.db.execute("UPDATE pdf_files SET status='processing',last_attempt_at=%s WHERE file_id='pdf_a'",
                         (datetime.now().isoformat(),))
         plan = {"file_ids": ["pdf_a"], "shared_file_ids": [], "running_file_ids": ["pdf_a"], "stale_file_ids": ["pdf_a"]}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             with self.assertRaisesRegex(ValueError, "近期|心跳|正在处理"):
                 reset_folder_database_artifacts("folder", confirm=True, release_stale=True)
         self.assertEqual(len(self.db.query("policy_clauses")), 3)
@@ -404,11 +416,11 @@ class ResetConsistencyTests(unittest.TestCase):
         self.db.execute("UPDATE pdf_files SET status='processing',last_attempt_at=%s WHERE file_id='pdf_a'", (old,))
         self.db.execute("INSERT INTO pdf_batch_items (file_id,status,heartbeat_at) VALUES ('pdf_a','running',%s)", (datetime.now().isoformat(),))
         plan = {"file_ids": ["pdf_a"], "shared_file_ids": [], "running_file_ids": ["pdf_a"], "stale_file_ids": ["pdf_a"]}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             with self.assertRaises(ValueError):
                 reset_folder_database_artifacts("folder", confirm=True, release_stale=True)
             self.db.execute("UPDATE pdf_batch_items SET heartbeat_at=%s", (old,))
-            with patch("file_reset.reset_file_database_artifacts", side_effect=RuntimeError("清理失败")):
+            with patch('processing.reset.reset_file_database_artifacts', side_effect=RuntimeError("清理失败")):
                 with self.assertRaises(RuntimeError):
                     reset_folder_database_artifacts("folder", confirm=True, release_stale=True)
             self.assertEqual(self.db.query("pdf_batch_items")[0]["status"], "running")
@@ -419,7 +431,7 @@ class ResetConsistencyTests(unittest.TestCase):
     def test_stale_flag_cannot_release_processing_without_timestamp(self):
         self.db.execute("UPDATE pdf_files SET status='processing' WHERE file_id='pdf_a'")
         plan = {"file_ids": ["pdf_a"], "shared_file_ids": [], "running_file_ids": ["pdf_a"], "stale_file_ids": ["pdf_a"]}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             with self.assertRaises(ValueError):
                 reset_folder_database_artifacts("folder", confirm=True, release_stale=True)
         self.assertEqual(self.db.query("pdf_files", "file_id='pdf_a'")[0]["status"], "processing")
@@ -429,7 +441,7 @@ class ResetConsistencyTests(unittest.TestCase):
                         ((datetime.now() - timedelta(days=2)).isoformat(),))
         self.db.execute("INSERT INTO policy_clause_classification_items (clause_id,status) VALUES ('a1','running')")
         plan = {"file_ids": ["pdf_a"], "shared_file_ids": [], "running_file_ids": ["pdf_a"], "stale_file_ids": ["pdf_a"]}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             with self.assertRaisesRegex(ValueError, "正在处理"):
                 reset_folder_database_artifacts("folder", confirm=True, release_stale=True)
         self.assertEqual(self.db.query("pdf_files", "file_id='pdf_a'")[0]["status"], "processing")
@@ -439,7 +451,7 @@ class ResetConsistencyTests(unittest.TestCase):
                         ((datetime.now() - timedelta(days=2)).isoformat(),))
         self.db.execute("UPDATE policy_documents SET structure_status='running' WHERE policy_id='a'")
         plan = {"file_ids": ["pdf_a"], "shared_file_ids": [], "running_file_ids": ["pdf_a"], "stale_file_ids": ["pdf_a"]}
-        with patch("file_reset.load_folder_reset_plan", return_value=plan):
+        with patch('processing.reset.load_folder_reset_plan', return_value=plan):
             result = reset_folder_database_artifacts("folder", confirm=True, release_stale=True)
         self.assertEqual(result["reset_file_ids"], ["pdf_a"])
         self.assertEqual(self.db.query("policy_documents", "policy_id='a'")[0]["structure_status"], "pending")

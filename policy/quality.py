@@ -299,7 +299,7 @@ def export_clause_review(
         raise ValueError("每份制度的抽检条款数必须大于等于 1")
 
     if document_loader is None or clause_loader is None:
-        from policy.storage import get_policy_clauses, get_policy_documents_for_batch
+        from .storage import get_policy_clauses, get_policy_documents_for_batch
 
         document_loader = document_loader or get_policy_documents_for_batch
         clause_loader = clause_loader or get_policy_clauses
@@ -335,7 +335,7 @@ def export_graph_review(
     if not str(run_id or "").strip():
         raise ValueError("抽取运行 ID 不能为空")
     if candidate_loader is None:
-        from policy.storage import get_policy_graph_candidates
+        from .storage import get_policy_graph_candidates
 
         candidate_loader = get_policy_graph_candidates
 
@@ -359,7 +359,7 @@ def export_process_review(
     if not str(process_run_id or "").strip():
         raise ValueError("流程判定运行 ID 不能为空")
     if candidate_loader is None:
-        from policy.storage import get_policy_process_review_candidates
+        from .storage import get_policy_process_review_candidates
 
         candidate_loader = get_policy_process_review_candidates
     candidates = candidate_loader(process_run_id)
@@ -381,7 +381,7 @@ def export_process_graph_review(
     if not str(run_id or "").strip():
         raise ValueError("流程图谱抽取运行 ID 不能为空")
     if candidate_loader is None:
-        from policy.storage import get_policy_process_graph_candidates
+        from .storage import get_policy_process_graph_candidates
 
         candidate_loader = get_policy_process_graph_candidates
     candidates = candidate_loader(run_id)

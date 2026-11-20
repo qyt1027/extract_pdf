@@ -1,12 +1,13 @@
 # parsers/pymupdf_parser.py
-import fitz
 import base64
-import uuid
 import hashlib
-from typing import List, Optional, Dict, Any
-from models import ContentBlock, BlockType, MinerUTaskStatus
-from parsers.base import ParserStrategy
-from config import app_config
+import uuid
+from typing import Dict, List, Optional
+
+import fitz
+
+from core.models import BlockType, ContentBlock, MinerUTaskStatus
+from .base import ParserStrategy
 
 
 class PyMuPDFParser(ParserStrategy):

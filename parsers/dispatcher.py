@@ -1,11 +1,12 @@
 # parsers/dispatcher.py
-from typing import Optional, List
-from parsers.base import ParserStrategy
-from parsers.cloud_mineru import CloudMineruParser
-from parsers.mineru import MinerUParser
-from parsers.pymupdf_parser import PyMuPDFParser
-from config import app_config
-from models import ContentBlock
+from typing import List, Optional
+
+from core.config import app_config
+from core.models import ContentBlock
+from .base import ParserStrategy
+from .cloud_mineru import CloudMineruParser
+from .mineru import MinerUParser
+from .pymupdf_parser import PyMuPDFParser
 
 
 class PDFParser:
@@ -44,12 +45,12 @@ class PDFParser:
     def parse(self, file_path: str, page_count: int = 0) -> List[ContentBlock]:
         """同步解析 PDF"""
         if file_path.lower().endswith(".docx"):
-            from parsers.docx_parser import parse_docx
+            from .docx_parser import parse_docx
 
             return parse_docx(file_path)
         if file_path.lower().endswith(".doc"):
             from pathlib import Path
-            from parsers.mhtml_doc import is_mhtml_document, parse_mhtml_document
+            from .mhtml_doc import is_mhtml_document, parse_mhtml_document
 
             if is_mhtml_document(Path(file_path).read_bytes()):
                 return parse_mhtml_document(file_path)

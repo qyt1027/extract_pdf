@@ -1,16 +1,16 @@
 """制度条款义务、许可、禁止分类测试。"""
 from __future__ import annotations
 
-import unittest
-from unittest.mock import patch
-from pathlib import Path
 import subprocess
 import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 
 class PolicyClauseRuleClassificationTests(unittest.TestCase):
     def test_explicit_obligation_keeps_continuous_evidence(self) -> None:
-        from policy.classification import classify_clause_by_rules
+        from policy.clause_classification.logic import classify_clause_by_rules
 
         result = classify_clause_by_rules("申请人应当提交完整的报销材料。")
 
@@ -19,7 +19,7 @@ class PolicyClauseRuleClassificationTests(unittest.TestCase):
         self.assertEqual(result.source, "rule")
 
     def test_explicit_permission_is_recognized(self) -> None:
-        from policy.classification import classify_clause_by_rules
+        from policy.clause_classification.logic import classify_clause_by_rules
 
         result = classify_clause_by_rules("学生可以申请延期办理。")
 
@@ -27,7 +27,7 @@ class PolicyClauseRuleClassificationTests(unittest.TestCase):
         self.assertEqual(result.evidence, {"permission": "可以"})
 
     def test_explicit_prohibition_is_recognized(self) -> None:
-        from policy.classification import classify_clause_by_rules
+        from policy.clause_classification.logic import classify_clause_by_rules
 
         result = classify_clause_by_rules("任何单位不得虚报费用。")
 
@@ -35,7 +35,7 @@ class PolicyClauseRuleClassificationTests(unittest.TestCase):
         self.assertEqual(result.evidence, {"prohibition": "不得"})
 
     def test_mixed_clause_keeps_all_normative_labels(self) -> None:
-        from policy.classification import classify_clause_by_rules
+        from policy.clause_classification.logic import classify_clause_by_rules
 
         result = classify_clause_by_rules("申请人不得拆分报销，并应当如实填写用途。")
 
@@ -46,7 +46,7 @@ class PolicyClauseRuleClassificationTests(unittest.TestCase):
         )
 
     def test_clause_without_explicit_signal_requires_model(self) -> None:
-        from policy.classification import classify_clause_by_rules
+        from policy.clause_classification.logic import classify_clause_by_rules
 
         result = classify_clause_by_rules("学校财务部门负责相关事项。")
 
@@ -54,7 +54,7 @@ class PolicyClauseRuleClassificationTests(unittest.TestCase):
         self.assertTrue(result.needs_model)
 
     def test_empty_clause_is_other_without_model(self) -> None:
-        from policy.classification import classify_clause_by_rules
+        from policy.clause_classification.logic import classify_clause_by_rules
 
         result = classify_clause_by_rules("   ")
 
@@ -64,7 +64,7 @@ class PolicyClauseRuleClassificationTests(unittest.TestCase):
 
 class PolicyClauseClassificationValidationTests(unittest.TestCase):
     def test_other_cannot_be_combined_with_normative_label(self) -> None:
-        from policy.classification import validate_classification
+        from policy.clause_classification.logic import validate_classification
 
         with self.assertRaisesRegex(ValueError, "other"):
             validate_classification(
@@ -74,7 +74,7 @@ class PolicyClauseClassificationValidationTests(unittest.TestCase):
             )
 
     def test_model_payload_supports_multiple_labels(self) -> None:
-        from policy.classification import parse_model_classification
+        from policy.clause_classification.logic import parse_model_classification
 
         result = parse_model_classification(
             "申请人不得隐瞒事实，并需承担相应责任。",
@@ -90,7 +90,7 @@ class PolicyClauseClassificationValidationTests(unittest.TestCase):
         self.assertEqual(result.source, "llm")
 
     def test_model_other_uses_original_clause_as_evidence(self) -> None:
-        from policy.classification import parse_model_classification
+        from policy.clause_classification.logic import parse_model_classification
 
         result = parse_model_classification(
             "本办法由财务部门负责解释。",
@@ -100,7 +100,7 @@ class PolicyClauseClassificationValidationTests(unittest.TestCase):
         self.assertEqual(result.evidence, {"other": "本办法由财务部门负责解释。"})
 
     def test_model_unknown_label_is_rejected_instead_of_ignored(self) -> None:
-        from policy.classification import parse_model_classification
+        from policy.clause_classification.logic import parse_model_classification
 
         with self.assertRaisesRegex(ValueError, "非法"):
             parse_model_classification(
@@ -115,17 +115,17 @@ class PolicyClauseClassificationValidationTests(unittest.TestCase):
 
 class PolicyClauseClassificationRunnerTests(unittest.TestCase):
     def test_rule_result_does_not_call_model(self) -> None:
-        from policy.classification_runner import classify_policy_clause
+        from policy.clause_classification.runner import classify_policy_clause
 
-        with patch("policy.classification_runner.call_classification_llm") as call_model:
+        with patch("policy.clause_classification.runner.call_classification_llm") as call_model:
             result = classify_policy_clause({"raw_text": "申请人必须提交材料。"})
 
         self.assertEqual(result.labels, ["obligation"])
         call_model.assert_not_called()
 
     def test_uncertain_rule_result_uses_model(self) -> None:
-        from policy.classification import ClauseClassification
-        from policy.classification_runner import classify_policy_clause
+        from policy.clause_classification.logic import ClauseClassification
+        from policy.clause_classification.runner import classify_policy_clause
 
         model_result = ClauseClassification(
             labels=["other"],
@@ -135,7 +135,7 @@ class PolicyClauseClassificationRunnerTests(unittest.TestCase):
             source="llm",
         )
         with patch(
-            "policy.classification_runner.call_classification_llm",
+            "policy.clause_classification.runner.call_classification_llm",
             return_value=model_result,
         ) as call_model:
             result = classify_policy_clause({"raw_text": "学校财务部门负责相关事项。"})
@@ -144,7 +144,7 @@ class PolicyClauseClassificationRunnerTests(unittest.TestCase):
         call_model.assert_called_once()
 
     def test_only_nonempty_article_paragraph_and_item_are_selected(self) -> None:
-        from policy.classification_runner import select_classifiable_clauses
+        from policy.clause_classification.runner import select_classifiable_clauses
 
         clauses = [
             {"clause_id": "chapter", "level": "chapter", "raw_text": "第一章 总则"},
@@ -159,7 +159,7 @@ class PolicyClauseClassificationRunnerTests(unittest.TestCase):
         self.assertEqual([item["clause_id"] for item in selected], ["article", "paragraph", "item"])
 
     def test_model_failure_marks_item_failed_for_resume(self) -> None:
-        from policy.classification_runner import run_policy_clause_classification
+        from policy.clause_classification.runner import run_policy_clause_classification
 
         updates: list[tuple[str, dict]] = []
         with (
@@ -174,7 +174,7 @@ class PolicyClauseClassificationRunnerTests(unittest.TestCase):
             patch("policy.storage.update_policy_classification_item", side_effect=lambda item_id, values: updates.append((item_id, values))),
             patch("policy.storage.upsert_policy_classification_result") as save_result,
             patch("policy.storage.refresh_policy_classification_run", return_value={"run_id": "run_1", "status": "partial_failed"}),
-            patch("policy.classification_runner.call_classification_llm", side_effect=RuntimeError("模型不可用")),
+            patch("policy.clause_classification.runner.call_classification_llm", side_effect=RuntimeError("模型不可用")),
         ):
             result = run_policy_clause_classification("run_1")
 
@@ -186,7 +186,7 @@ class PolicyClauseClassificationRunnerTests(unittest.TestCase):
 
 class PolicyClassificationReviewTests(unittest.TestCase):
     def test_chinese_labels_round_trip(self) -> None:
-        from policy.classification_review import format_labels, parse_reviewed_labels
+        from policy.clause_classification.review import format_labels, parse_reviewed_labels
 
         text = format_labels(["obligation", "prohibition"])
 
@@ -194,13 +194,13 @@ class PolicyClassificationReviewTests(unittest.TestCase):
         self.assertEqual(parse_reviewed_labels(text), ["obligation", "prohibition"])
 
     def test_import_rejects_other_combined_with_normative_label(self) -> None:
-        from policy.classification_review import parse_reviewed_labels
+        from policy.clause_classification.review import parse_reviewed_labels
 
         with self.assertRaisesRegex(ValueError, "其他"):
             parse_reviewed_labels("其他、许可")
 
     def test_quality_metrics_include_exact_match_precision_and_recall(self) -> None:
-        from policy.classification_review import calculate_classification_metrics
+        from policy.clause_classification.review import calculate_classification_metrics
 
         metrics = calculate_classification_metrics([
             ({"obligation"}, {"obligation"}),
@@ -213,7 +213,7 @@ class PolicyClassificationReviewTests(unittest.TestCase):
         self.assertEqual(metrics["labels"]["prohibition"]["recall"], 0.0)
 
     def test_reviewed_labels_take_priority_over_system_labels(self) -> None:
-        from policy.classification_review import effective_labels
+        from policy.clause_classification.review import effective_labels
 
         self.assertEqual(
             effective_labels({
@@ -270,7 +270,7 @@ class PolicyClassificationCliTests(unittest.TestCase):
         self.assertIn(b"--classification-reviewer", completed.stderr)
 
     def test_each_label_requires_evidence_from_source_text(self) -> None:
-        from policy.classification import validate_classification
+        from policy.clause_classification.logic import validate_classification
 
         with self.assertRaisesRegex(ValueError, "原文"):
             validate_classification(

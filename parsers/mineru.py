@@ -11,9 +11,9 @@ from typing import Dict, List, Optional
 import fitz
 import httpx
 
-from config import MinerUConfig, app_config
-from models import BlockType, ContentBlock, MinerUTaskStatus
-from parsers.base import ParserStrategy
+from core.config import MinerUConfig, app_config
+from core.models import BlockType, ContentBlock, MinerUTaskStatus
+from .base import ParserStrategy
 
 
 logger = logging.getLogger(__name__)

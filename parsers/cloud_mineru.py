@@ -1,21 +1,51 @@
 # parsers/cloud_mineru.py
-import time
 import hashlib
-import uuid
-import logging
-import httpx
 import io
-import zipfile
-import re
 import json as json_lib
+import logging
 import os
+import re
+import time
+import zipfile
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, List
-from models import BlockType, ContentBlock, MinerUTaskStatus
-from config import app_config, CloudMinerUConfig
-from parsers.base import ParserStrategy
+from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
+
+from core.config import CloudMinerUConfig, app_config
+from core.models import BlockType, ContentBlock, MinerUTaskStatus
+from core.paths import PROJECT_ROOT
+from .base import ParserStrategy
 
 logger = logging.getLogger(__name__)
+
+_OCR_REVIEW_SPAN = re.compile(
+    r'(?:^|(?<=[。！？])|(?<=[.!?])(?=[ \t]))[ \t]*'
+    r'(?:the\s+)?ground\s+truth\s+image\s+(?:displays?|shows?|contains?)\b'
+    r'(?:(?!\r?\n[ \t]*\r?\n)[\s\S]){0,2000}?'
+    r'\b(?:(?:hence|therefore|thus),?\s+)?(?:the\s+)?(?:ocr\s+)?(?:result|output)\s+'
+    r'(?:is\s+(?:inconsistent|not\s+consistent)\s+with|does\s+not\s+match)\s+'
+    r'(?:the\s+)?(?:ground\s+truth|gt)(?:[.!?]|(?=[ \t]*\r?$))'
+    r'(?:\s*(?:therefore,?\s+)?(?:the\s+)?corrected\s+ocr\s+output\s+is\s*:\s*\[empty\s+string\])?',
+    re.IGNORECASE | re.MULTILINE,
+)
+_OCR_REVIEW_RULE = re.compile(r'\b(?:according\s+to|under|violating)\s+(?:the\s+)?rule\s+\d+\b', re.IGNORECASE)
+_OCR_REVIEW_ASSESSMENT = re.compile(
+    r'\b(?:provided\s+ocr\s+(?:content|output|text)|incorrect\s+interpretation|ocr\s+has\s+hallucinated)\b',
+    re.IGNORECASE,
+)
+
+
+def _strip_ocr_review(text: str) -> str:
+    """同时核对评审开头、编号规则、纠错表述和结论，只删除匹配到的评审文字。"""
+    def remove_review(match: re.Match) -> str:
+        paragraph = match.group()
+        if _OCR_REVIEW_RULE.search(paragraph) and _OCR_REVIEW_ASSESSMENT.search(paragraph):
+            return ""
+        return paragraph
+
+    cleaned = _OCR_REVIEW_SPAN.sub(remove_review, text)
+    return cleaned.strip() if cleaned != text else text
 
 
 class CloudMineruParser(ParserStrategy):
@@ -150,8 +180,6 @@ class CloudMineruParser(ParserStrategy):
             )
 
 
-
-
     def _get_status_v4(self, task_id: str) -> MinerUTaskStatus:
         resp = self.client.get(f"https://mineru.net/api/v4/extract-results/batch/{task_id}")
 
@@ -271,7 +299,7 @@ class CloudMineruParser(ParserStrategy):
         # DEBUG 保存（调试逻辑）
         debug_save_zip = os.environ.get("CLOUDMINERU_SAVE_ZIP", "0") == "1"
         if debug_save_zip:
-            debug_zip_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "debug_zips")
+            debug_zip_dir = str(PROJECT_ROOT / "debug_zips")
             os.makedirs(debug_zip_dir, exist_ok=True)
             zip_hash = hashlib.md5(zip_url.encode()).hexdigest()[:12]
             with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as zf_debug:
@@ -453,6 +481,18 @@ class CloudMineruParser(ParserStrategy):
                         block_type = BlockType.IMAGE
                     else:
                         block_type = BlockType.TEXT
+                        text_key = "text"
+                        if not content and isinstance(item.get("content"), str):
+                            text_key = "content"
+                            content = item[text_key]
+                        if isinstance(content, str):
+                            cleaned = _strip_ocr_review(content)
+                            if cleaned != content:
+                                logger.info("已清理 CloudMinerU OCR 评审文字（页索引 %s）", item.get("page_idx", 0))
+                                if not cleaned:
+                                    continue
+                                content = cleaned
+                                item = {**item, text_key: cleaned}
 
                     # 3. 构造 ContentBlock，挂载 raw
                     block = ContentBlock(
@@ -487,11 +527,14 @@ class CloudMineruParser(ParserStrategy):
                                    f"错误信息：{status.err_msg}")
 
 
-
             print(f"返回md链接：{status.markdown_url}")
             resp_md = httpx.get(status.markdown_url, timeout=30.0)
             resp_md.raise_for_status()
-            md_content = resp_md.text
+            md_content = _strip_ocr_review(resp_md.text)
+            if md_content != resp_md.text:
+                logger.info("已清理 CloudMinerU Markdown 中的 OCR 评审文字")
+                if not md_content:
+                    return blocks
             blocks.append(ContentBlock(
                 block_id=f"blk_{hashlib.md5(file_path.encode()).hexdigest()[:12]}",
                 type=BlockType.TEXT,

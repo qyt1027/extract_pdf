@@ -1,22 +1,17 @@
 """报销、差旅、采购流程条款分流的行为测试。"""
 from __future__ import annotations
 
-import unittest
+import csv
+import json
 import os
 import subprocess
 import sys
-import csv
 import tempfile
-import json
-from unittest.mock import patch
+import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from policy.process import (
-    PolicyProcessDecision,
-    build_process_label,
-    classify_process_clause,
-    is_process_label_eligible,
-)
+from policy.graph.process import PolicyProcessDecision, build_process_label, classify_process_clause, is_process_label_eligible
 
 # 存储层导入时会校验服务配置；本测试仅通过注入加载器验证筛选逻辑。
 for _key, _value in {
@@ -34,22 +29,11 @@ for _key, _value in {
 }.items():
     os.environ.setdefault(_key, _value)
 
-from models import ProcessingVersion
-from policy.storage import (
-    create_policy_extraction_run,
-    create_policy_process_run,
-    get_eligible_process_clauses,
-    get_policy_process_graph_candidates,
-)
-from policy.process_runner import run_policy_process_classification
-from policy.extraction import create_and_run_process_policy_extraction
-from policy.quality import (
-    build_process_review_rows,
-    export_process_graph_review,
-    export_process_review,
-    summarize_process_reviews,
-    write_quality_report,
-)
+from core.models import ProcessingVersion
+from policy.storage import create_policy_extraction_run, create_policy_process_run, get_eligible_process_clauses, get_policy_process_graph_candidates
+from policy.graph.process_runner import run_policy_process_classification
+from policy.graph.extraction import create_and_run_process_policy_extraction
+from policy.quality import build_process_review_rows, export_process_graph_review, export_process_review, summarize_process_reviews, write_quality_report
 
 
 class PolicyProcessTests(unittest.TestCase):
@@ -191,13 +175,13 @@ class PolicyProcessTests(unittest.TestCase):
         }
 
         with (
-            patch("policy.process_runner.get_policy_process_run", return_value={"run_id": "process_run_1"}),
-            patch("policy.process_runner.get_policy_process_items", return_value=items),
-            patch("policy.process_runner.get_policy_clause", side_effect=lambda clause_id: clauses[clause_id]),
-            patch("policy.process_runner.upsert_policy_process_label", side_effect=labels.append),
-            patch("policy.process_runner.update_policy_process_item", side_effect=lambda item_id, values: item_updates.append((item_id, values))),
-            patch("policy.process_runner.update_policy_process_run", side_effect=lambda run_id, values: run_updates.append(values)),
-            patch("policy.process_runner.refresh_policy_process_run", return_value={"run_id": "process_run_1", "status": "succeeded"}),
+            patch("policy.graph.process_runner.get_policy_process_run", return_value={"run_id": "process_run_1"}),
+            patch("policy.graph.process_runner.get_policy_process_items", return_value=items),
+            patch("policy.graph.process_runner.get_policy_clause", side_effect=lambda clause_id: clauses[clause_id]),
+            patch("policy.graph.process_runner.upsert_policy_process_label", side_effect=labels.append),
+            patch("policy.graph.process_runner.update_policy_process_item", side_effect=lambda item_id, values: item_updates.append((item_id, values))),
+            patch("policy.graph.process_runner.update_policy_process_run", side_effect=lambda run_id, values: run_updates.append(values)),
+            patch("policy.graph.process_runner.refresh_policy_process_run", return_value={"run_id": "process_run_1", "status": "succeeded"}),
         ):
             result = run_policy_process_classification("process_run_1")
 
@@ -221,17 +205,17 @@ class PolicyProcessTests(unittest.TestCase):
         clause = {"clause_id": "c1", "raw_text": "出差人员应提交行程单。"}
 
         with (
-            patch("policy.process_runner.get_policy_process_run", return_value={
+            patch("policy.graph.process_runner.get_policy_process_run", return_value={
                 "run_id": "process_run_1",
                 "selected_domains": ["reimbursement"],
                 "domain_catalog_version": "process-domain-catalog-v1",
             }),
-            patch("policy.process_runner.get_policy_process_items", return_value=items),
-            patch("policy.process_runner.get_policy_clause", return_value=clause),
-            patch("policy.process_runner.upsert_policy_process_label", side_effect=labels.append),
-            patch("policy.process_runner.update_policy_process_item"),
-            patch("policy.process_runner.update_policy_process_run"),
-            patch("policy.process_runner.refresh_policy_process_run", return_value={"run_id": "process_run_1", "status": "succeeded"}),
+            patch("policy.graph.process_runner.get_policy_process_items", return_value=items),
+            patch("policy.graph.process_runner.get_policy_clause", return_value=clause),
+            patch("policy.graph.process_runner.upsert_policy_process_label", side_effect=labels.append),
+            patch("policy.graph.process_runner.update_policy_process_item"),
+            patch("policy.graph.process_runner.update_policy_process_run"),
+            patch("policy.graph.process_runner.refresh_policy_process_run", return_value={"run_id": "process_run_1", "status": "succeeded"}),
         ):
             run_policy_process_classification("process_run_1")
 
@@ -302,8 +286,8 @@ class PolicyProcessTests(unittest.TestCase):
         """防止流程抽取命令要求用户重复填写批次或从错误批次取条款。"""
         expected = {"run": {"run_id": "policy_run_1"}}
         with (
-            patch("policy.extraction.get_policy_process_run", return_value={"batch_id": "batch_1"}),
-            patch("policy.extraction.create_and_run_policy_extraction", return_value=expected) as create_run,
+            patch("policy.graph.extraction.get_policy_process_run", return_value={"batch_id": "batch_1"}),
+            patch("policy.graph.extraction.create_and_run_policy_extraction", return_value=expected) as create_run,
         ):
             result = create_and_run_process_policy_extraction("process_run_1", limit=5)
 
@@ -336,7 +320,7 @@ class PolicyProcessTests(unittest.TestCase):
         self.assertEqual(candidates[0]["process_domains"], ["reimbursement"])
         self.assertEqual(candidates[0]["process_reason"], "命中报销事项和提交动作")
 
-    def test_cli_core_help_prioritizes_pdf_to_entity_relation_workflow(self) -> None:
+    def test_cli_core_help_prioritizes_file_index_and_qa_workflow(self) -> None:
         """防止默认帮助重新退化为堆满高级参数的命令清单。"""
         project_root = Path(__file__).resolve().parents[1]
         completed = subprocess.run(
@@ -347,12 +331,13 @@ class PolicyProcessTests(unittest.TestCase):
         )
 
         self.assertIn(b"--process-dir", completed.stdout)
-        self.assertIn(b"--extract-policy-batch", completed.stdout)
-        self.assertIn(b"--review-policy-run", completed.stdout)
-        self.assertIn(b"--export-policy-graph-review", completed.stdout)
+        self.assertNotIn(b"--rebuild-policy-clause-index", completed.stdout)
+        self.assertIn(b"/policy-qa", completed.stdout)
+        self.assertNotIn(b"--extract-policy-batch", completed.stdout)
+        self.assertNotIn(b"--review-policy-run", completed.stdout)
+        self.assertNotIn(b"--export-policy-graph-review", completed.stdout)
         self.assertIn(b"--help-all", completed.stdout)
         self.assertNotIn(b"--classify-policy-process-batch", completed.stdout)
-        self.assertNotIn(b"--rebuild-policy-clause-index", completed.stdout)
 
     def test_cli_full_help_lists_process_graph_commands(self) -> None:
         """防止进阶流程图谱命令在完整帮助中不可发现。"""

@@ -1,6 +1,6 @@
-"""面向 Agent 的四个制度工具及参数约束。"""
-from datetime import date
+"""面向 Agent 的制度工具及参数约束。"""
 import re
+from datetime import date
 from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
@@ -42,13 +42,24 @@ def register_tools(server: MCPServer) -> None:
     read_only = ToolAnnotations(read_only_hint=True, destructive_hint=False)
 
     @server.tool(annotations=read_only)
+    async def get_policy_relations(
+        policy_id: Annotated[str, Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$", description="目录或检索结果中的制度 ID")],
+        ctx: Context,
+        depth: Annotated[int, Field(ge=1, le=3, description="关联跳数，1 到 3")] = 1,
+        direction: Annotated[Literal["both", "incoming", "outgoing"], Field(description="双向、被哪些文件引用、引用了哪些文件")] = "both",
+        limit: Annotated[int, Field(ge=1, le=200, description="最多返回的原始关系数")] = 100,
+    ) -> dict[str, Any]:
+        """查询文件级引用、提及和废止关联，返回原文与审核状态。未入库或多版本目标会明确标记；多跳关系不能推导废止或失效，待审核废止不能当作已确认结论。"""
+        return await _invoke(ctx, "get_policy_relations", policy_id, depth, direction, limit)
+
+    @server.tool(annotations=read_only)
     async def search_policy_clauses(
         query: Annotated[str, Field(min_length=1, description="制度问题或条款检索关键词")],
         ctx: Context,
         top_k: Annotated[int, Field(ge=1, le=20, description="返回条款数，1 到 20")] = 10,
         as_of: Annotated[str | None, Field(description="适用日期 YYYY-MM-DD；省略时沿用检索接口的效力处理")] = None,
     ) -> dict[str, Any]:
-        """检索制度原文证据，适合自行分析或继续查询。返回来源、上下文和效力提示；相似度不代表适用或条件齐全。"""
+        """检索制度原文证据，适合自行分析或继续查询。返回来源、上下文和效力提示；相似度不代表适用或条件齐全。（启用语义重排时返回重排后的结果）"""
         return await _invoke(ctx, "search_clauses", _text(query, "查询内容"), top_k, _date(as_of))
 
     @server.tool(annotations=read_only)

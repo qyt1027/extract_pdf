@@ -5,23 +5,33 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from models import BlockType, ContentBlock
+from core.models import BlockType, ContentBlock
 
 
 class DocumentClassificationInputTests(unittest.TestCase):
-    def test_mhtml_source_doc_number_is_strong_policy_signal(self) -> None:
-        from document_classfier import classify_document
+    def test_mhtml_source_doc_number_alone_does_not_make_a_policy(self) -> None:
+        from classification.document import classify_document
 
         result = classify_document(
-            "example.doc", "武汉大学关于博士研究生学制改革的实施意见.doc",
+            "example.doc", "武汉大学工作安排.doc",
             parsed_text="一、总体要求\n二、具体措施",
             source_metadata={"doc_number": "武大研字[2023]7号"},
         )
+        self.assertEqual(result["doc_type"], "other")
+        self.assertIn("检测到公文发文字号", result["signals"])
+
+    def test_numbered_implementation_opinion_with_scope_and_requirements_is_policy(self) -> None:
+        from classification.document import classify_document
+
+        result = classify_document(
+            "example.doc", "武汉大学关于博士研究生学制改革的实施意见.doc",
+            parsed_text="本意见适用于学校各培养单位。各单位应当按照规定学制组织培养。",
+            source_metadata={"doc_number": "武大研字[2023]7号"},
+        )
         self.assertEqual(result["doc_type"], "policy_regulation")
-        self.assertIn("[强信号]检测到公文发文字号", result["signals"])
 
     def test_cloudmineru_text_is_used_for_policy_classification(self) -> None:
-        from document_classfier import classify_document
+        from classification.document import classify_document
 
         parsed_text = (
             "武汉大学文件\n关于印发《武汉大学教师管理办法》的通知\n"
@@ -37,7 +47,7 @@ class DocumentClassificationInputTests(unittest.TestCase):
         self.assertEqual(result["doc_type"], "policy_regulation")
 
     def test_notice_printing_policy_filename_is_strong_policy_signal(self) -> None:
-        from document_classfier import classify_document
+        from classification.document import classify_document
 
         result = classify_document(
             "missing.pdf",
@@ -48,7 +58,7 @@ class DocumentClassificationInputTests(unittest.TestCase):
         self.assertEqual(result["doc_type"], "policy_regulation")
 
     def test_pipeline_builds_classification_text_from_text_blocks(self) -> None:
-        from pipeline import build_document_classification_text
+        from processing.pipeline import build_document_classification_text
 
         blocks = [
             ContentBlock(type=BlockType.TEXT, page_num=1, content="第二条 应当提交材料。"),
@@ -64,7 +74,7 @@ class DocumentClassificationInputTests(unittest.TestCase):
 
 class WordBatchDiscoveryTests(unittest.TestCase):
     def test_batch_discovers_pdf_doc_and_docx_only(self) -> None:
-        from batch_processor import _list_supported_files
+        from processing.batch import _list_supported_files
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

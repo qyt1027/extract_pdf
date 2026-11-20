@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def warmup_policy_qa() -> dict:
     """预热只访问本地模型和数据库，不调用问答或重排大模型接口。"""
-    from policy.retrieval import _encode_policy_clause_texts, _get_bm25_index_snapshot
+    from .retrieval import _encode_policy_clause_texts, _get_bm25_index_snapshot
 
     report = {}
     for stage, label, operation in (

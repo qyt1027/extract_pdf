@@ -1,8 +1,8 @@
 """按文件重置自动产物命令测试。"""
 from __future__ import annotations
 
-import os
 import hashlib
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,7 +11,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from file_reset import build_folder_reset_plan, reset_file_database_artifacts, reset_folder_database_artifacts
+from processing.reset import (
+    build_folder_reset_plan,
+    reset_file_database_artifacts,
+    reset_folder_database_artifacts,
+)
 
 
 class _ResetRelationalStorage:
@@ -185,8 +189,8 @@ class FileResetCliTests(unittest.TestCase):
     def test_folder_reset_requires_confirmation_and_blocks_shared_or_running(self) -> None:
         """预览无副作用，共享文件及运行中的文件不能批量清理。"""
         plan = {"file_ids": ["pdf_a"], "shared_file_ids": [], "running_file_ids": []}
-        with patch("file_reset.storage", _ResetStorage()), patch("file_reset.load_folder_reset_plan", return_value=plan), patch(
-            "file_reset.reset_file_database_artifacts"
+        with patch('processing.reset.storage', _ResetStorage()), patch('processing.reset.load_folder_reset_plan', return_value=plan), patch(
+            'processing.reset.reset_file_database_artifacts'
         ) as resetter:
             self.assertEqual(reset_folder_database_artifacts("folder", confirm=False), plan)
             resetter.assert_not_called()
@@ -195,8 +199,8 @@ class FileResetCliTests(unittest.TestCase):
 
         for key in ("shared_file_ids", "running_file_ids"):
             blocked = {**plan, key: ["pdf_a"]}
-            with patch("file_reset.load_folder_reset_plan", return_value=blocked), patch(
-                "file_reset.reset_file_database_artifacts"
+            with patch('processing.reset.load_folder_reset_plan', return_value=blocked), patch(
+                'processing.reset.reset_file_database_artifacts'
             ) as resetter:
                 with self.assertRaises(ValueError):
                     reset_folder_database_artifacts("folder", confirm=True)
@@ -261,11 +265,11 @@ class FileResetCliTests(unittest.TestCase):
         """防止重跑只改状态却保留旧向量、表格和溯源记录。"""
         fake_storage = _ResetStorage()
 
-        with patch("file_reset.storage", fake_storage):
+        with patch('processing.reset.storage', fake_storage):
             summary = reset_file_database_artifacts("pdf_123")
 
         self.assertEqual(summary, {
-            "text_vectors": 2,
+            "text_vectors": 4,
             "data_tables": 1,
             "forms": 1,
             "table_catalog_records": 2,
@@ -275,6 +279,7 @@ class FileResetCliTests(unittest.TestCase):
         self.assertEqual(fake_storage.relational.dropped_tables, ["pdf_pdf_123_tbl_sales"])
         self.assertEqual(fake_storage.vector.deleted, [
             ("pdf_pdf_123_text", "file_id", "pdf_123"),
+            ("pdf_text_chunks", "file_id", "pdf_123"),
             ("policy_clause_search", "policy_id", "policy_1"),
             ("policy_clause_vectors", "policy_id", "policy_1"),
             ("policy_assertion_search_v2", "policy_id", "policy_1"),
@@ -288,7 +293,7 @@ class FileResetCliTests(unittest.TestCase):
         """防止废止关系等下游记录通过外键阻止制度条款重置。"""
         fake_storage = _ResetStorage()
 
-        with patch("file_reset.storage", fake_storage):
+        with patch('processing.reset.storage', fake_storage):
             reset_file_database_artifacts("pdf_123")
 
         sql = fake_storage.relational.executed_sql
@@ -325,10 +330,10 @@ class FileResetCliTests(unittest.TestCase):
         fake_storage = _ResetStorage()
         fake_storage.vector = _MissingPolicyVectorStorage()
 
-        with patch("file_reset.storage", fake_storage):
+        with patch('processing.reset.storage', fake_storage):
             summary = reset_file_database_artifacts("pdf_123")
 
-        self.assertEqual(summary["text_vectors"], 2)
+        self.assertEqual(summary["text_vectors"], 4)
         self.assertEqual(summary["policy_clauses"], 2)
         self.assertIn(
             ("pdf_files", {"status": "pending", "error_message": "", "last_attempt_at": None}, '"file_id" = %s', ("pdf_123",)),
@@ -340,7 +345,7 @@ class FileResetCliTests(unittest.TestCase):
         fake_storage = _ResetStorage()
         fake_storage.vector = _PermissionDeniedPolicyVectorStorage()
 
-        with patch("file_reset.storage", fake_storage):
+        with patch('processing.reset.storage', fake_storage):
             with self.assertRaisesRegex(_PgDatabaseError, "权限不够"):
                 reset_file_database_artifacts("pdf_123")
 
@@ -349,7 +354,7 @@ class FileResetCliTests(unittest.TestCase):
         fake_storage = _ResetStorage()
         fake_storage.vector = _EnglishTextPermissionDeniedPolicyVectorStorage()
 
-        with patch("file_reset.storage", fake_storage):
+        with patch('processing.reset.storage', fake_storage):
             with self.assertRaisesRegex(_PgDatabaseError, "permission denied"):
                 reset_file_database_artifacts("pdf_123")
 
@@ -358,7 +363,7 @@ class FileResetCliTests(unittest.TestCase):
         fake_storage = _ResetStorage()
         fake_storage.vector = _EnglishTextMissingPolicyVectorStorage()
 
-        with patch("file_reset.storage", fake_storage):
+        with patch('processing.reset.storage', fake_storage):
             summary = reset_file_database_artifacts("pdf_123")
 
         self.assertEqual(summary["policy_clauses"], 2)

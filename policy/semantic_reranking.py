@@ -1,8 +1,8 @@
 """对混合召回候选进行通用语义相关性评分。"""
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import threading
 import time
 from collections import OrderedDict
@@ -44,7 +44,7 @@ def _validated_scores(question: str, candidates: list[dict[str, Any]]) -> tuple[
 
 def _cached_scores(question: str, candidates: list[dict[str, Any]], context: str) -> tuple[tuple[int, ...], bool]:
     """按问题、日期、模型和候选内容缓存评分，合并相同的并发请求。"""
-    from config import app_config
+    from core.config import app_config
     config = app_config.answer_llm
     ttl, capacity = config.rerank_cache_ttl_seconds, config.rerank_cache_max_entries
     if ttl <= 0 or capacity <= 0:
@@ -93,8 +93,8 @@ def _cached_scores(question: str, candidates: list[dict[str, Any]], context: str
 
 def call_rerank_llm(question: str, candidates: list[dict[str, Any]]) -> str:
     """复用问答接口评分，限制耗时且不让模型改写证据。"""
-    from config import app_config
-    from policy.extraction import create_llm_client
+    from core.config import app_config
+    from .llm import create_llm_client
 
     config = app_config.answer_llm
     if not config.api_key.strip():
@@ -135,7 +135,7 @@ def semantic_rerank_candidates(
     """保留原始证据和融合分数，语义评分失败时明确降级。"""
     if not candidates:
         return []
-    from config import app_config
+    from core.config import app_config
     candidates = candidates[:app_config.answer_llm.rerank_candidate_limit]
     try:
         scores, cache_hit = _cached_scores(question, candidates, cache_context)

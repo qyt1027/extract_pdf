@@ -1,8 +1,8 @@
 """办事流程图谱抽取与人工修正的行为测试。"""
 from __future__ import annotations
 
-import os
 import json
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -23,16 +23,12 @@ for _key, _value in {
 }.items():
     os.environ.setdefault(_key, _value)
 
-from config import app_config
-from models import PolicyReviewStatus
-from policy.extraction import (
-    _build_outputs,
-    build_extraction_prompt,
-    create_llm_client,
-    is_local_llm_endpoint,
-)
-from policy.reviewer import build_manual_annotation, review_policy_candidate
-from policy.workflow_graph import build_policy_workflow_graph, export_policy_workflow_graph
+from core.config import app_config
+from core.models import PolicyReviewStatus
+from policy.graph.extraction import _build_outputs, build_extraction_prompt
+from policy.llm import create_llm_client, is_local_llm_endpoint
+from policy.graph.reviewer import build_manual_annotation, review_policy_candidate
+from policy.graph.workflow_graph import build_policy_workflow_graph, export_policy_workflow_graph
 
 
 class PolicyWorkflowExtractionTests(unittest.TestCase):
@@ -148,8 +144,8 @@ class PolicyWorkflowExtractionTests(unittest.TestCase):
         """防止系统代理把指向本机 Ollama 的请求转发后造成 502。"""
         local_client = object()
         with (
-            patch("policy.extraction.httpx.Client", return_value=local_client) as http_client_factory,
-            patch("policy.extraction.OpenAI", return_value=object()) as openai_factory,
+            patch("policy.llm.httpx.Client", return_value=local_client) as http_client_factory,
+            patch("policy.llm.OpenAI", return_value=object()) as openai_factory,
         ):
             create_llm_client("http://127.0.0.1:11434/v1", "ollama")
 
@@ -179,11 +175,11 @@ class PolicyWorkflowExtractionTests(unittest.TestCase):
         status_updates = []
 
         with (
-            patch("policy.reviewer.get_policy_review_candidate", return_value=candidate),
-            patch("policy.reviewer.get_policy_clause", return_value=clause),
-            patch("policy.reviewer.insert_manual_annotation", side_effect=saved_annotations.append),
+            patch("policy.graph.reviewer.get_policy_review_candidate", return_value=candidate),
+            patch("policy.graph.reviewer.get_policy_clause", return_value=clause),
+            patch("policy.graph.reviewer.insert_manual_annotation", side_effect=saved_annotations.append),
             patch(
-                "policy.reviewer.update_policy_candidate_review_status",
+                "policy.graph.reviewer.update_policy_candidate_review_status",
                 side_effect=lambda kind, candidate_id, status: status_updates.append((kind, candidate_id, status)),
             ),
         ):

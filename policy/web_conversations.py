@@ -9,7 +9,7 @@ from typing import Any
 
 from psycopg2.extras import RealDictCursor
 
-from storage_adapter import storage
+from storage.adapters import storage
 
 _WEB_TABLES_READY = False
 

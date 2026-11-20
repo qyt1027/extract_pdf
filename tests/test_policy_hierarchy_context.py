@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
+
+from policy.answering import _build_answer_prompt, select_answer_evidence
 from policy.retrieval import attach_clause_hierarchy_context
-from policy.answering import select_answer_evidence, _build_answer_prompt
 
 
 class HierarchyContextTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 """规章制度的文档元数据与条款结构化管线。
 
-本阶段只处理结构，不调用大模型。实体和关系由 policy.extraction 单独处理。
+本阶段只处理结构，不调用大模型。实体和关系由 policy.graph.extraction 单独处理。
 """
 from __future__ import annotations
 
@@ -13,8 +13,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from models import BlockType, ContentBlock, PolicyClause, PolicyStructureStatus, ReviewItem
-from policy.storage import (
+from core.models import BlockType, ContentBlock, PolicyClause, PolicyStructureStatus, ReviewItem
+from core.policy_signatures import (
+    is_policy_closing_heading,
+    policy_closing_provisions_start,
+    policy_footer_size,
+    policy_terminal_date,
+)
+from .storage import (
     insert_review_item,
     mark_policy_structure_failed,
     replace_policy_clauses,
@@ -30,8 +36,10 @@ _BOOK_RE = re.compile(rf"^第\s*({_NUMBER})\s*编[：:、.\s]*(.*)$", re.S)
 _CHAPTER_RE = re.compile(rf"^第\s*({_NUMBER})\s*章[：:、.\s]*(.*)$", re.S)
 _SECTION_RE = re.compile(rf"^第\s*({_NUMBER})\s*节[：:、.\s]*(.*)$", re.S)
 _ARTICLE_RE = re.compile(rf"^第\s*({_NUMBER})\s*条(?!款)[：:、.\s]*(.*)$", re.S)
-_ARTICLE_INLINE_RE = re.compile(rf"(?<!\S)(第\s*{_NUMBER}\s*条)")
-_PAREN_ITEM_RE = re.compile(r"^[（(]([^）)]+)[）)]\s*(?:[：:、.]\s*)?(.*)$", re.S)
+_ARTICLE_INLINE_RE = re.compile(rf"(?<!\S)(?:\*\*|__)?(第\s*{_NUMBER}\s*条)(?!款)")
+_LEADING_BOLD_RE = re.compile(r"^(\*\*|__)(.+?)\1")
+_PAREN_ITEM_RE = re.compile(rf"^[（(]\s*({_NUMBER})\s*[）)]\s*(?:[：:、.]\s*)?(.*)$", re.S)
+_APPENDIX_RE = re.compile(r"^(附件(?:[一二三四五六七八九十\d]+)?)(?:[：:、.．\s]+(.*))?$")
 _CN_ITEM_RE = re.compile(r"^([一二三四五六七八九十百千万]+)、(?:\s*)(.*)$", re.S)
 _NUM_ITEM_RE = re.compile(r"^(\d+)[.、](?:\s*)(.*)$", re.S)
 _PARAGRAPH_RE = re.compile(rf"^第\s*({_NUMBER})\s*款(?:[：:、.\s]+(.*))?$", re.S)
@@ -70,8 +78,8 @@ class _ClauseDraft:
         path: list[str] = []
         node: Optional[_ClauseDraft] = self
         while node:
-            if node.level in {"book", "chapter", "section"} and node.label:
-                path.append(node.label)
+            if node.level in {"book", "chapter", "section", "appendix"} and node.label:
+                path.append(node.label if node.label == "附表" else node.raw_parts[0] if node.raw_parts else node.label)
             node = node.parent
         return list(reversed(path))
 
@@ -80,7 +88,7 @@ class _ClauseDraft:
         if not text:
             return
         self.raw_parts.append(text)
-        if not self.page_start:
+        if len(self.raw_parts) == 1:
             self.page_start = page_num or 0
         self.page_end = max(self.page_end, page_num or 0)
         if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
@@ -138,6 +146,8 @@ def _lines_from_block(block: ContentBlock) -> list[str]:
 
 def _marker(line: str) -> Optional[tuple[str, str, str]]:
     """识别层级标记，返回(level, label, remainder)。"""
+    # 解析器可能用 Markdown 加粗编号；只规范识别用的行首，保留正文格式。
+    line = _LEADING_BOLD_RE.sub(r"\2", line, count=1)
     for level, pattern in (
         ("book", _BOOK_RE),
         ("chapter", _CHAPTER_RE),
@@ -151,6 +161,10 @@ def _marker(line: str) -> Optional[tuple[str, str, str]]:
             remainder = (match.group(2) or "").strip()
             label_word = {"book": "编", "chapter": "章", "section": "节", "article": "条", "paragraph": "款"}[level]
             return level, f"第{number}{label_word}", remainder
+
+    match = _APPENDIX_RE.fullmatch(line)
+    if match:
+        return "appendix", match.group(1), (match.group(2) or "").strip()
 
     match = _PAREN_ITEM_RE.match(line)
     if match:
@@ -183,12 +197,13 @@ def _nearest_parent(
 ) -> Optional[_ClauseDraft]:
     """寻找新节点的最近合法父节点。"""
     allowed = {
-        "book": set(),
-        "chapter": {"book"},
-        "section": {"book", "chapter"},
-        "article": {"book", "chapter", "section"},
-        "paragraph": {"article"},
-        "item": {"article", "paragraph"},
+        "book": {"appendix"},
+        "chapter": {"book", "appendix"},
+        "section": {"book", "chapter", "appendix"},
+        "article": {"book", "chapter", "section", "appendix"},
+        "paragraph": {"article", "appendix"},
+        "item": {"article", "paragraph", "appendix"},
+        "appendix": set(),
         "preamble": set(),
     }
     node = current
@@ -197,7 +212,7 @@ def _nearest_parent(
     while scope and scope.level == "item":
         scope = scope.parent
     # 条、款内部统一使用编号层级；正式边界仍由原有章条规则管理。
-    nested_numbers = numbered_hierarchy or bool(scope and scope.level in {"article", "paragraph"})
+    nested_numbers = numbered_hierarchy or bool(scope and scope.level in {"article", "paragraph", "appendix"})
     while node:
         if rank is not None and node.level == "item":
             parent_rank = _numbered_item_rank(node.label)
@@ -209,6 +224,27 @@ def _nearest_parent(
             return node
         node = node.parent
     return None
+
+
+def _closing_footer_size(
+    lines: list[tuple[ContentBlock, str, tuple[str, str, str] | None]],
+    end: int,
+    *,
+    include_publication: bool = True,
+    include_standalone_date: bool = False,
+) -> int:
+    """识别边界前的落款和版记，也可识别整份正文末尾的独立日期。"""
+    texts = []
+    for index in range(end - 1, -1, -1):
+        block, text, marker = lines[index]
+        if block.type != BlockType.TEXT:
+            break
+        if marker and not (include_standalone_date and index == end - 1 and policy_terminal_date(text)):
+            break
+        texts.append(text)
+    return policy_footer_size(
+        texts[::-1], include_publication=include_publication, include_standalone_date=include_standalone_date,
+    )
 
 
 def build_policy_clauses(
@@ -223,17 +259,39 @@ def build_policy_clauses(
     ordered_blocks = [item for _, item in sorted(
         enumerate(blocks), key=lambda pair: (pair[1].page_num, pair[0])
     )]
-    prepared_blocks = [(block, _lines_from_block(block)) for block in ordered_blocks
-                       if block.type in {BlockType.TEXT, BlockType.TABLE}]
+    prepared_lines = [
+        (block, line, _marker(line))
+        for block in ordered_blocks if block.type in {BlockType.TEXT, BlockType.TABLE}
+        for line in _lines_from_block(block)
+    ]
+    footer_lines: set[int] = set()
+    implicit_appendices: set[int] = set()
+    appendix_after_footer: dict[tuple[str, str, str], int] = {}
+    for index, (block, _, marker) in enumerate(prepared_lines):
+        is_table = block.type == BlockType.TABLE
+        is_appendix = marker is not None and marker[0] == "appendix"
+        if not (is_table or is_appendix):
+            continue
+        size = _closing_footer_size(prepared_lines, index, include_publication=not is_table)
+        if not size:
+            continue
+        footer_lines.update(range(index - size, index))
+        if is_table:
+            implicit_appendices.add(index)
+        elif marker and marker[2]:
+            appendix_after_footer.setdefault(marker, index)
+    end = len(prepared_lines)
+    body_end = end - _closing_footer_size(prepared_lines, end, include_standalone_date=True)
+    footer_lines.update(range(body_end, end))
+    closing_start = policy_closing_provisions_start([text for _, text, _ in prepared_lines], body_end)
     # 正式章条制度继续使用原规则，仅为没有正式层级的编号文档补充父子关系。
     formal_levels = {"book", "chapter", "section", "article", "paragraph"}
     numbered_hierarchy = not any(
         marker and marker[0] in formal_levels
-        for _, lines in prepared_blocks for line in lines
-        for marker in [_marker(line)]
+        for _, _, marker in prepared_lines
     )
 
-    def create_node(level: str, label: str, remainder: str, block: ContentBlock) -> _ClauseDraft:
+    def create_node(level: str, label: str, remainder: str, block: ContentBlock, raw_line: str | None = None) -> _ClauseDraft:
         nonlocal sequence, current
         parent = _nearest_parent(current, level, label, numbered_hierarchy=numbered_hierarchy)
         sequence += 1
@@ -245,28 +303,52 @@ def build_policy_clauses(
             label=label,
             parent=parent,
         )
-        draft.article_no = label[1:-1] if level == "article" else (parent.article_no if parent else "")
-        if level == "paragraph":
-            draft.paragraph_no = label[1:-1]
-        if level == "item":
+        draft.article_no = label if level == "article" else (parent.article_no if parent else "")
+        draft.paragraph_no = label if level == "paragraph" else (parent.paragraph_no if parent else "")
+        if level in {"item", "appendix"}:
             draft.item_no = label
-        draft.append(f"{label} {remainder}".strip(), block.page_num, block.bbox)
+        draft.append(raw_line if raw_line is not None else remainder if level == "preamble"
+                     else f"{label} {remainder}".strip(), block.page_num, block.bbox)
         drafts.append(draft)
         current = draft
         return draft
 
-    for block, lines in prepared_blocks:
-        for line in lines:
-            marker = _marker(line)
-            if marker:
-                level, label, remainder = marker
-                create_node(level, label, remainder, block)
-                continue
-
-            if current is None:
-                create_node("preamble", "前言", line, block)
-            else:
+    for index, (block, line, marker) in enumerate(prepared_lines):
+        if index in footer_lines:
+            continue
+        if index in implicit_appendices:
+            # “附表”仅用于引用定位，原文不添加不存在的标题。
+            create_node("appendix", "附表", "", block, raw_line="")
+        if marker:
+            level, label, remainder = marker
+            # 紧接正文大项的同名附件预告，由落款后的正式附件标题代表。
+            if index < appendix_after_footer.get(marker, index):
+                following = prepared_lines[index + 1][2]
+                if following and (
+                    following[0] in formal_levels
+                    or (following[0] == "item" and _numbered_item_rank(following[1]) == 1)
+                ):
+                    continue
+            # 附件说明紧接重复的“附件”封面标记时保留为同一附件。
+            if level == "appendix" and current and current.level == "appendix" and current.label == label and len(current.raw_parts) == 1:
                 current.append(line, block.page_num, block.bbox)
+                continue
+            create_node(level, label, remainder, block)
+            continue
+
+        if current is None:
+            create_node("preamble", "前言", line, block)
+        elif (
+            index == closing_start
+            and numbered_hierarchy
+            and current.level == "item"
+            and not current.chapter_path
+            and len(current.raw_parts) > 1
+            and not is_policy_closing_heading(current.raw_parts[0][len(current.label):])
+        ):
+            create_node("paragraph", "", "", block, raw_line=line)
+        else:
+            current.append(line, block.page_num, block.bbox)
 
     clauses: list[PolicyClause] = []
     for draft in drafts:
@@ -277,7 +359,7 @@ def build_policy_clauses(
         search_text = " ".join(
             part for part in (prefix, draft.label, raw_text) if part
         ).strip()
-        confidence = 0.95 if draft.level in {"book", "chapter", "section", "article", "paragraph", "item"} else 0.75
+        confidence = 0.95 if draft.level in {"book", "chapter", "section", "article", "paragraph", "item", "appendix"} else 0.75
         clauses.append(
             PolicyClause(
                 clause_id=draft.clause_id,
@@ -322,7 +404,7 @@ def calculate_policy_parse_quality(blocks: list[ContentBlock], clauses: list[Pol
 
 def _guess_title(file_name: str, blocks: list[ContentBlock]) -> str:
     """优先使用可信文件名，否则按通知首页规则寻找正文标题。"""
-    from metadata_service import _is_low_confidence_source_name
+    from storage.file_records import _is_low_confidence_source_name
 
     source_name = Path(file_name).name
     file_title = "".join(Path(source_name).stem.split())
@@ -377,22 +459,27 @@ def _guess_title(file_name: str, blocks: list[ContentBlock]) -> str:
 def structure_policy_file(
     file_id: str, file_name: str, blocks: list[ContentBlock],
     metadata: Optional[dict[str, Any]] = None, structure_version: str = STRUCTURE_VERSION,
+    *, parts: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """拆分同一文件中的制度，分别建立条款、效力和检索索引。"""
-    from policy.document_parts import split_policy_document
-    parts = split_policy_document(blocks, dict(metadata or {}), file_name)
+    if parts is None:
+        from .document_parts import split_policy_document
+        parts = split_policy_document(blocks, dict(metadata or {}), file_name)
     old_relations = []
     if len(parts) > 1:
-        from policy.storage import get_policy_documents_for_file
-        from storage_adapter import storage
+        from .storage import get_policy_documents_for_file
+        from storage.adapters import storage
+        document_keys = {part['metadata'].get('document_key', '') for part in parts}
         for old in get_policy_documents_for_file(file_id):
+            if old.get('document_key', '') not in document_keys:
+                continue
             old_relations.extend(storage.relational.query(
                 'policy_document_relations', where='source_policy_id = %s',
                 params=(old['policy_id'],), limit=100000))
     documents = [structure_policy_document(file_id, file_name, part['blocks'],
                     part['metadata'], structure_version) for part in parts]
     if old_relations:
-        from policy.storage import get_policy_clauses
+        from .storage import get_policy_clauses
         current_clauses = [clause for doc in documents for clause in get_policy_clauses(doc['policy_id'])]
         for relation in old_relations:
             evidence = ''.join(str(relation.get('evidence_text') or '').split())
@@ -443,7 +530,7 @@ def structure_policy_document(
         replace_policy_clauses(policy_id, clauses, structure_version)
         try:
             # 时间治理失败不应推翻已经完成的条款结构化结果。
-            from policy.governance import apply_effective_date_governance
+            from .governance import apply_effective_date_governance
 
             apply_effective_date_governance(
                 policy_id,
@@ -461,7 +548,7 @@ def structure_policy_document(
             except Exception:
                 pass
         # replace_policy_clauses 已标记成功，这里只补写实际质量分数。
-        from storage_adapter import storage
+        from storage.adapters import storage
         storage.relational.update_rows(
             "policy_documents",
             {"parse_quality": quality},
@@ -480,7 +567,7 @@ def structure_policy_document(
             )
         try:
             # 索引失败不影响结构化结果，后续可通过批次重建命令恢复。
-            from policy.retrieval import sync_policy_clause_index
+            from .retrieval import sync_policy_clause_index
 
             indexed_clause_count = sync_policy_clause_index(policy_id)
             index_status = "succeeded"

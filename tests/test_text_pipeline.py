@@ -6,8 +6,8 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from models import BlockType, ContentBlock
-from text_pipeline import process_text_blocks
+from core.models import BlockType, ContentBlock
+from processing.text import process_text_blocks
 
 
 class TextPipelineTests(unittest.TestCase):
@@ -17,8 +17,8 @@ class TextPipelineTests(unittest.TestCase):
         texts = ['制定说明', '第一章 总则', '一、第一项。', '二、第二项。',
                  '第二章 职责', '（一）职责甲。', '（二）职责乙。']
         blocks = [ContentBlock(type=BlockType.TEXT, content=t) for t in texts]
-        with patch('text_pipeline.embed_chunks', side_effect=lambda c: c), \
-             patch('text_pipeline.store_chunks', return_value=0), redirect_stdout(io.StringIO()):
+        with patch('processing.text.embed_chunks', side_effect=lambda c: c), \
+             patch('processing.text.store_chunks', return_value=0), redirect_stdout(io.StringIO()):
             _, chunks = process_text_blocks(blocks, 'file_1', doc_type='policy_regulation')
         self.assertEqual([c.text for c in chunks], texts)
 
@@ -35,8 +35,8 @@ class TextPipelineTests(unittest.TestCase):
         output = io.StringIO()
 
         with (
-            patch("text_pipeline.embed_chunks", side_effect=lambda chunks: chunks),
-            patch("text_pipeline.store_chunks", return_value=0),
+            patch('processing.text.embed_chunks', side_effect=lambda chunks: chunks),
+            patch('processing.text.store_chunks', return_value=0),
             redirect_stdout(output),
         ):
             process_text_blocks(blocks, "file_1", doc_type="policy_regulation")
@@ -48,8 +48,8 @@ class TextPipelineTests(unittest.TestCase):
             "通知", "一、须先审核材料并报主管部门审批，未经批准不得实施相关活动。", "二、违规行为按规定处理。",
         ]]
         with (
-            patch("text_pipeline.embed_chunks", side_effect=lambda chunks: chunks),
-            patch("text_pipeline.store_chunks", return_value=3),
+            patch('processing.text.embed_chunks', side_effect=lambda chunks: chunks),
+            patch('processing.text.store_chunks', return_value=3),
             redirect_stdout(io.StringIO()),
         ):
             _, chunks = process_text_blocks(blocks, "file_1", doc_type="policy_regulation")

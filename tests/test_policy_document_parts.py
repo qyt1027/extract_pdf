@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
-from models import BlockType, ContentBlock
+
+from core.models import BlockType, ContentBlock
 from policy.document_parts import split_policy_document
 
 

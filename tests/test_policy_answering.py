@@ -33,11 +33,11 @@ class PolicyAnsweringTests(unittest.TestCase):
         self.assertIsNotNone(importlib.util.find_spec("policy.answering"))
 
     def test_policy_answer_route_is_registered(self) -> None:
-        from api import app
+        from web.api import app
         self.assertIn("/policy-answer", {route.path for route in app.routes})
 
     def test_policy_answer_openapi_uses_form_fields_with_date_format(self) -> None:
-        from api import app
+        from web.api import app
 
         operation = app.openapi()["paths"]["/policy-answer"]["post"]
         content = operation["requestBody"]["content"]
@@ -53,11 +53,11 @@ class PolicyAnsweringTests(unittest.TestCase):
         self.assertEqual(as_of_schema.get("format", date_schema.get("format")), "date")
 
     def test_policy_qa_page_is_registered(self) -> None:
-        from api import app
+        from web.api import app
         self.assertIn("/policy-qa", {route.path for route in app.routes})
 
     def test_policy_qa_page_contains_question_date_and_answer_regions(self) -> None:
-        from api import policy_qa_page
+        from web.api import policy_qa_page
         response = asyncio.run(policy_qa_page())
         html = bytes(response.body).decode("utf-8")
 
@@ -242,7 +242,7 @@ class PolicyAnsweringTests(unittest.TestCase):
         self.assertEqual(result["as_of_source"], "request")
 
     def test_missing_llm_configuration_degrades_with_evidence(self) -> None:
-        from config import app_config
+        from core.config import app_config
         candidates = [self._candidate("p1", "c1", 0.9, "applicable")]
         with (
             patch("policy.answering.search_indexed_policy_clauses", return_value=candidates),
@@ -256,7 +256,7 @@ class PolicyAnsweringTests(unittest.TestCase):
         self.assertIn("ANSWER_LLM_API_KEY", result["degraded_reason"])
 
     def test_answer_llm_uses_independent_deepseek_configuration(self) -> None:
-        from config import app_config
+        from core.config import app_config
 
         evidence = answering.select_answer_evidence([
             self._candidate("p1", "c1", 0.9, "applicable")
@@ -271,7 +271,7 @@ class PolicyAnsweringTests(unittest.TestCase):
             patch.object(app_config.answer_llm, "api_key", "deepseek-key"),
             patch.object(app_config.answer_llm, "model", "deepseek-flash"),
             patch.object(app_config.answer_llm, "thinking", False),
-            patch("policy.extraction.create_llm_client", return_value=client) as create_client,
+            patch("policy.llm.create_llm_client", return_value=client) as create_client,
         ):
             raw = answering.call_answer_llm("问题", "2026-09-16", evidence)
 
@@ -284,13 +284,13 @@ class PolicyAnsweringTests(unittest.TestCase):
         client.close.assert_called_once_with()
 
     def test_llm_client_creation_failure_is_wrapped_for_degradation(self) -> None:
-        from config import app_config
+        from core.config import app_config
         evidence = answering.select_answer_evidence([
             self._candidate("p1", "c1", 0.9, "applicable")
         ])
         with (
             patch.object(app_config.answer_llm, "api_key", "configured"),
-            patch("policy.extraction.create_llm_client", side_effect=RuntimeError("连接失败")),
+            patch("policy.llm.create_llm_client", side_effect=RuntimeError("连接失败")),
         ):
             with self.assertRaises(answering.PolicyAnswerGenerationError):
                 answering.call_answer_llm("问题", "2026-09-16", evidence)
@@ -306,7 +306,7 @@ class PolicyAnsweringTests(unittest.TestCase):
         self.assertEqual(result["citations"][0]["raw_text"], "条款c1")
 
     def test_policy_answer_api_returns_orchestrated_payload(self) -> None:
-        from api import policy_answer
+        from web.api import policy_answer
         expected = {
             "question": "差旅标准是什么？", "conclusion": "undetermined",
             "citations": [], "degraded": True,
@@ -316,7 +316,7 @@ class PolicyAnsweringTests(unittest.TestCase):
         self.assertEqual(json.loads(response.body), expected)
 
     def test_policy_answer_form_converts_date_before_orchestration(self) -> None:
-        from api import policy_answer
+        from web.api import policy_answer
         expected = {"question": "差旅标准是什么？", "as_of": "2026-09-16"}
         with patch("policy.answering.answer_policy_question", return_value=expected) as answer:
             response = asyncio.run(policy_answer(
@@ -328,7 +328,7 @@ class PolicyAnsweringTests(unittest.TestCase):
 
     def test_policy_answer_accepts_browser_multipart_form(self) -> None:
         import httpx
-        from api import app
+        from web.api import app
         expected = {"question": "差旅标准是什么？", "as_of": "2026-09-16"}
 
         async def post_form():
@@ -350,7 +350,7 @@ class PolicyAnsweringTests(unittest.TestCase):
 
     def test_policy_answer_api_rejects_invalid_form_date(self) -> None:
         import httpx
-        from api import app
+        from web.api import app
 
         async def post_invalid_date(value: str):
             transport = httpx.ASGITransport(app=app)

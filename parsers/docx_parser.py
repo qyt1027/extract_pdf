@@ -5,7 +5,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
-from models import BlockType, ContentBlock
+from core.models import BlockType, ContentBlock
 
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"

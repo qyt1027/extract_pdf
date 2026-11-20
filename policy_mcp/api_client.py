@@ -1,6 +1,7 @@
 """访问现有制度 HTTP 接口，不加载数据库或模型。"""
 import os
 from urllib.parse import quote
+
 import httpx
 
 
@@ -16,7 +17,7 @@ class PolicyAPIClient:
     """在服务生命周期内共享异步客户端。"""
 
     def __init__(self, base_url: str | None = None, *, transport=None):
-        address = base_url or os.getenv("POLICY_API_BASE_URL", "http://127.0.0.1:8000")
+        address = base_url or os.getenv("POLICY_API_BASE_URL", "http://127.0.0.1:12700")
         url = httpx.URL(address)
         if url.scheme not in {"http", "https"} or not url.host or url.query or url.fragment:
             raise ValueError("POLICY_API_BASE_URL 必须是无查询参数的 HTTP 或 HTTPS 地址")
@@ -84,4 +85,8 @@ class PolicyAPIClient:
         if as_of is not None:
             data["as_of"] = as_of
         return await self._request("POST", "policy-answer", data=data, read_timeout=180.0)
+
+    async def get_policy_relations(self, policy_id: str, depth: int = 1, direction: str = "both", limit: int = 100) -> dict:
+        return await self._request("GET", f"api/policies/{quote(policy_id, safe='')}/relations",
+                                   params={"depth": depth, "direction": direction, "limit": limit})
 

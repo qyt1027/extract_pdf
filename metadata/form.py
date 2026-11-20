@@ -1,7 +1,8 @@
 # metadata/form.py
 import re
 from typing import Dict, List
-from models import ContentBlock
+
+from core.models import ContentBlock
 
 
 def extract_form_metadata(blocks: List[ContentBlock]) -> Dict[str, str]:

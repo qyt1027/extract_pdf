@@ -1,11 +1,14 @@
 """本地 MinerU 解析器的行为测试。"""
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from zipfile import ZipFile
 
 import fitz
 import httpx
@@ -27,6 +30,68 @@ for _key, _value in {
     os.environ.setdefault(_key, _value)
 
 
+class CloudMinerUReviewOutputTests(unittest.TestCase):
+    review = (
+        'The Ground Truth image displays a solid horizontal line. According to Rule 2 '
+        '(UNDERSCORE & LINE RULES), a decorative line should be ignored. The provided OCR content '
+        'was "____". Hence, the OCR result is inconsistent with the Ground Truth.'
+    )
+
+    def test_batch_removes_review_blocks_and_preserves_valid_text(self) -> None:
+        from core.models import MinerUTaskStatus
+        from parsers.cloud_mineru import CloudMineruParser
+
+        ordinary = (
+            'The Ground Truth image shows the road. According to Rule 2, labels use the visible boundaries. '
+            'The OCR result does not match the Ground Truth.'
+        )
+        items = [
+            {'type': 'text', 'page_idx': 0, 'text': self.review},
+            {'type': 'text', 'page_idx': 1, 'content': self.review},
+            {'type': 'text', 'page_idx': 2, 'content': ordinary},
+            {'type': 'text', 'page_idx': 3, 'text': f'设备管理办法。 {self.review}\n\n第一条 应按流程办理。'},
+            {'type': 'table', 'page_idx': 4, 'table_body': '<table><tr><td>有效表格</td></tr></table>'},
+        ]
+        archive = io.BytesIO()
+        with ZipFile(archive, 'w') as package:
+            package.writestr('report.md', '')
+            package.writestr('report_content_list.json', json.dumps(items))
+        url = 'https://mineru.test/report.zip'
+        status = MinerUTaskStatus(task_id='test', status='done', zip_url=url)
+        parser = CloudMineruParser(mode='v4')
+        response = httpx.Response(200, content=archive.getvalue(), request=httpx.Request('GET', url))
+        with (
+            patch.object(parser, 'submit', return_value='test'),
+            patch.object(parser, 'poll_until_done', return_value=status),
+            patch('parsers.cloud_mineru.httpx.get', return_value=response),
+        ):
+            blocks = parser.parse('report.pdf')
+
+        self.assertEqual([block.page_num for block in blocks], [2, 3, 4])
+        self.assertEqual(blocks[0].content, ordinary)
+        self.assertEqual([line for line in blocks[1].content.splitlines() if line], ['设备管理办法。', '第一条 应按流程办理。'])
+        self.assertEqual(blocks[1].raw['text'], blocks[1].content)
+        self.assertEqual(blocks[2].content, items[4]['table_body'])
+
+    def test_agent_removes_review_paragraph_without_losing_the_document(self) -> None:
+        from core.models import MinerUTaskStatus
+        from parsers.cloud_mineru import CloudMineruParser
+
+        parser = CloudMineruParser(mode='agent')
+        url = 'https://mineru.test/result.md'
+        status = MinerUTaskStatus(task_id='test', status='done', markdown_url=url)
+        markdown = f'{self.review}\n\nTherefore, the corrected OCR output is:\n\n[Empty String]\n\n# 设备借用须知'
+        response = httpx.Response(200, text=markdown, request=httpx.Request('GET', url))
+        with (
+            patch.object(parser, 'submit', return_value='test'),
+            patch.object(parser, 'poll_until_done', return_value=status),
+            patch('parsers.cloud_mineru.httpx.get', return_value=response),
+        ):
+            blocks = parser.parse('report.pdf')
+
+        self.assertEqual([block.content for block in blocks], ['# 设备借用须知'])
+
+
 class MinerUParserTests(unittest.TestCase):
     """验证本地 MinerU 的 PDF 图像请求和结果转换。"""
 
@@ -41,7 +106,7 @@ class MinerUParserTests(unittest.TestCase):
 
     @staticmethod
     def _create_parser(handler):
-        from config import MinerUConfig
+        from core.config import MinerUConfig
         from parsers.mineru import MinerUParser
 
         config = MinerUConfig(

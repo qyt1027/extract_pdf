@@ -1,7 +1,7 @@
 """创建 MCP 服务，管理业务客户端生命周期及 HTTP 认证。"""
-from contextlib import asynccontextmanager
 import hmac
 import os
+from contextlib import asynccontextmanager
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings

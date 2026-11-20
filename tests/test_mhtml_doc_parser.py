@@ -3,10 +3,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from core.models import BlockType
 from parsers.dispatcher import PDFParser
 from policy.pipeline import build_policy_clauses
-from models import BlockType
-from table_pipeline import parse_table_html
+from processing.tables import parse_table_html
 
 
 class MhtmlDocParserTests(unittest.TestCase):
@@ -63,13 +63,13 @@ class MhtmlDocParserTests(unittest.TestCase):
         self.assertEqual(structure.rows, [["设备", "100元"]])
 
     def test_single_file_command_does_not_open_mhtml_doc_as_pdf(self) -> None:
-        from main import run_process
-        from models import ProcessingResult, ProcessingStatus
+        from commands.handlers import run_process
+        from core.models import ProcessingResult, ProcessingStatus
 
         result = ProcessingResult(file_id="pdf_1", status=ProcessingStatus.DONE)
         with (
             patch("fitz.open", side_effect=AssertionError("不应作为 PDF 打开")),
-            patch("pipeline.process_pdf", return_value=result) as process,
+            patch('processing.pipeline.process_pdf', return_value=result) as process,
             patch("policy.abolition.prompt_abolition_relation_insertion"),
             patch("policy.clause_export.export_file_clause_structure"),
         ):
@@ -94,13 +94,14 @@ class MhtmlDocParserTests(unittest.TestCase):
             blocks = PDFParser(backend="pymupdf").parse(str(path))
 
         metadata = extract_document_metadata(blocks, "policy_regulation")
-        self.assertEqual(metadata["doc_number"], "武大采购字[2023]2号")
+        self.assertEqual(metadata["doc_number"], "武大采购字〔2023〕2号")
+        self.assertEqual(metadata["doc_number_raw"], "武大采购字[2023]2号")
         self.assertEqual(metadata["issuer"], "采购与招投标管理中心")
         self.assertNotIn("issue_date", metadata)
 
     def test_policy_metadata_does_not_treat_legal_basis_as_issuer(self) -> None:
         from metadata.policy import extract_policy_metadata
-        from models import ContentBlock
+        from core.models import ContentBlock
 
         block = ContentBlock(type=BlockType.TEXT, content="第一条 根据《相关规定办法》制定本细则。")
 

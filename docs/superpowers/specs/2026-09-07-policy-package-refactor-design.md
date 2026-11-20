@@ -1,3 +1,5 @@
+> 历史记录：以下为当时的设计或实施计划，保留原文与旧代码路径供追溯；不代表当前实现或真实数据质量验收。现有入口及状态见 [制度知识研究说明](../../research/policy-knowledge.md) 和 [历史索引](../../research/policy-knowledge-history.md)。
+
 # 制度模块目录重构设计
 
 ## 目标

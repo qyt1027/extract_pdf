@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from policy.knowledge_sampling_v2 import FIELDS, load_sample_ids, select_samples
+from policy.knowledge_v2.sampling import FIELDS, load_sample_ids, select_samples
 
 
 class SamplingTests(unittest.TestCase):

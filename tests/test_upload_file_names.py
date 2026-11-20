@@ -30,8 +30,8 @@ class UploadFileNameTests(unittest.TestCase):
 
     def test_upload_forwards_original_file_name_to_processing_pipeline(self) -> None:
         """防止上传接口只传临时路径，表格目录最终显示 tmp*.pdf。"""
-        from api import app
-        from models import ProcessingResult, ProcessingStatus
+        from web.api import app
+        from core.models import ProcessingResult, ProcessingStatus
 
         result = ProcessingResult(file_id="pdf_test", status=ProcessingStatus.DONE)
 
@@ -44,8 +44,8 @@ class UploadFileNameTests(unittest.TestCase):
                 )
 
         with (
-            patch("api.record_file_start", return_value="pdf_test"),
-            patch("api.process_pdf", return_value=result) as process,
+            patch('web.api.record_file_start', return_value="pdf_test"),
+            patch('web.api.process_pdf', return_value=result) as process,
         ):
             response = asyncio.run(request())
 
@@ -57,8 +57,8 @@ class UploadFileNameTests(unittest.TestCase):
 
     def test_upload_accepts_doc_and_preserves_word_suffix_for_cloudmineru(self) -> None:
         """防止上传入口在 CloudMinerU 前错误拒绝其原生支持的 Word 文件。"""
-        from api import app
-        from models import ProcessingResult, ProcessingStatus
+        from web.api import app
+        from core.models import ProcessingResult, ProcessingStatus
 
         result = ProcessingResult(file_id="pdf_doc", status=ProcessingStatus.DONE)
 
@@ -71,8 +71,8 @@ class UploadFileNameTests(unittest.TestCase):
                 )
 
         with (
-            patch("api.record_file_start", return_value="pdf_doc"),
-            patch("api.process_pdf", return_value=result) as process,
+            patch('web.api.record_file_start', return_value="pdf_doc"),
+            patch('web.api.process_pdf', return_value=result) as process,
         ):
             response = asyncio.run(request())
 
@@ -82,7 +82,7 @@ class UploadFileNameTests(unittest.TestCase):
 
     def test_temporary_file_name_uses_cleaned_pdf_title(self) -> None:
         """防止低可信 tmp 文件名覆盖 PDF 中可识别的论文标题。"""
-        import metadata_service
+        from storage import file_records as metadata_service
 
         choose_name = getattr(
             metadata_service,
@@ -100,7 +100,7 @@ class UploadFileNameTests(unittest.TestCase):
 
     def test_generic_download_name_uses_pdf_title(self) -> None:
         """防止下载器生成的通用文件名压过可识别的 PDF 标题。"""
-        from metadata_service import choose_display_file_name
+        from storage.file_records import choose_display_file_name
 
         self.assertEqual(
             choose_display_file_name("download.pdf", "Cracking SQL Barriers"),
@@ -109,7 +109,7 @@ class UploadFileNameTests(unittest.TestCase):
 
     def test_semantic_source_file_name_beats_different_pdf_title(self) -> None:
         """防止标题抽取误识别时覆盖本来可靠的原始文件名。"""
-        from metadata_service import choose_display_file_name
+        from storage.file_records import choose_display_file_name
 
         self.assertEqual(
             choose_display_file_name(
@@ -121,8 +121,8 @@ class UploadFileNameTests(unittest.TestCase):
 
     def test_upload_returns_accepted_before_background_processing_finishes(self) -> None:
         """防止长时间解析占用上传连接，令浏览器在拿到任务 ID 前断开。"""
-        from api import app
-        from models import ProcessingResult, ProcessingStatus
+        from web.api import app
+        from core.models import ProcessingResult, ProcessingStatus
 
         result = ProcessingResult(file_id="pdf_queued", status=ProcessingStatus.DONE)
 
@@ -135,8 +135,8 @@ class UploadFileNameTests(unittest.TestCase):
                 )
 
         with (
-            patch("api.record_file_start", return_value="pdf_queued", create=True),
-            patch("api.process_pdf", return_value=result),
+            patch('web.api.record_file_start', return_value="pdf_queued", create=True),
+            patch('web.api.process_pdf', return_value=result),
         ):
             response = asyncio.run(request())
 
@@ -149,7 +149,7 @@ class UploadFileNameTests(unittest.TestCase):
 
     def test_upload_preflight_allows_cross_origin_browser_request(self) -> None:
         """防止前端跨域上传在发出 POST 前被浏览器的 CORS 预检拦截。"""
-        from api import app
+        from web.api import app
 
         async def request():
             transport = httpx.ASGITransport(app=app)

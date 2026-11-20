@@ -171,7 +171,7 @@ class PolicyRetrievalRuleTests(unittest.TestCase):
     def test_policy_search_rejects_invalid_as_of(self) -> None:
         """非法时间点应在访问检索服务前返回 422。"""
         from fastapi import HTTPException
-        from api import policy_search
+        from web.api import policy_search
 
         with self.assertRaises(HTTPException) as raised:
             asyncio.run(policy_search(q="差旅报销材料", top_k=3, as_of="2020/01/01"))
@@ -290,7 +290,7 @@ class PolicyRetrievalBM25Tests(unittest.TestCase):
             db=SimpleNamespace(fetch_all=lambda _sql: clauses),
         )
         with (
-            patch("storage_adapter.storage", fake_storage),
+            patch('storage.adapters.storage', fake_storage),
             patch("policy.storage.ensure_policy_tables"),
         ):
             loaded = retrieval.load_policy_clauses_for_bm25()
@@ -365,16 +365,8 @@ class PolicyPackageLayoutTests(unittest.TestCase):
 
     def test_policy_modules_are_available_from_one_package(self) -> None:
         """防止迁移后只移动了文件却遗漏任一制度处理能力。"""
-        from policy import (
-            extraction,
-            pipeline,
-            process,
-            process_runner,
-            quality,
-            retrieval,
-            reviewer,
-            storage,
-        )
+        from policy import pipeline, quality, retrieval, storage
+        from policy.graph import extraction, process, process_runner, reviewer
 
         self.assertTrue(callable(pipeline.structure_policy_document))
         self.assertTrue(callable(retrieval.search_indexed_policy_clauses))
@@ -398,17 +390,17 @@ class PolicyRetrievalIntegrationTests(unittest.TestCase):
         database = str(os.environ["POLICY_RETRIEVAL_TEST_DATABASE"]).strip()
         if not (database == "test" or database.startswith("test_") or database.endswith("_test")):
             self.skipTest("测试数据库名称必须为 test、test_* 或 *_test，避免误写生产库")
-        if "config" in sys.modules:
-            from config import app_config
+        if 'core.config' in sys.modules:
+            from core.config import app_config
 
             if app_config.postgres.database != database:
                 self.skipTest("当前进程已连接非测试数据库，拒绝写入集成测试数据")
         else:
             os.environ["PG_DATABASE"] = database
 
-        from metadata_service import ensure_file_record
+        from storage.file_records import ensure_file_record
         from policy.storage import replace_policy_clauses, upsert_policy_document
-        from storage_adapter import storage
+        from storage.adapters import storage
 
         self._ensure_file_record = ensure_file_record
         self._replace_policy_clauses = replace_policy_clauses
@@ -439,7 +431,7 @@ class PolicyRetrievalIntegrationTests(unittest.TestCase):
 
     def _create_policy(self, title: str, clause_id: str, raw_text: str) -> str:
         """在隔离库创建带真实条款的制度，用于端到端索引验证。"""
-        from models import PolicyClause, PolicyStructureStatus
+        from core.models import PolicyClause, PolicyStructureStatus
 
         token = uuid.uuid4().hex
         record = self._ensure_file_record(
@@ -504,7 +496,7 @@ class PolicyRetrievalIntegrationTests(unittest.TestCase):
         )
         sync_policy_clause_index(policy_id)
 
-        from api import policy_search
+        from web.api import policy_search
 
         response = asyncio.run(policy_search(q="差旅报销材料", top_k=3))
         payload = json.loads(response.body)

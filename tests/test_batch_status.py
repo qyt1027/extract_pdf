@@ -5,8 +5,8 @@ from contextlib import redirect_stdout
 from datetime import datetime
 from unittest.mock import patch
 
-from batch_processor import _refresh_batch, get_batch_status, run_batch
-from main import _print_batch_summary
+from commands.handlers import _print_batch_summary
+from processing.batch import _refresh_batch, get_batch_status, run_batch
 
 
 class BatchStatusTests(unittest.TestCase):
@@ -15,8 +15,8 @@ class BatchStatusTests(unittest.TestCase):
                       "started_at": datetime(2026, 9, 27, 17, 51), "finished_at": None}
 
     def snapshot(self, items):
-        with patch("batch_processor.get_batch", return_value=self.batch), patch(
-            "batch_processor.get_batch_items", return_value=items
+        with patch('processing.batch.get_batch', return_value=self.batch), patch(
+            'processing.batch.get_batch_items', return_value=items
         ):
             return get_batch_status("batch_test")
 
@@ -51,9 +51,9 @@ class BatchStatusTests(unittest.TestCase):
         def update_batch(batch_id, values):
             saved.update(values)
             self.batch.update(values)
-        with patch("batch_processor.get_batch", return_value=self.batch), patch(
-            "batch_processor.get_batch_items", return_value=[{"status": "retry_wait", "error_kind": "transient"}]
-        ), patch("batch_processor.update_batch", side_effect=update_batch):
+        with patch('processing.batch.get_batch', return_value=self.batch), patch(
+            'processing.batch.get_batch_items', return_value=[{"status": "retry_wait", "error_kind": "transient"}]
+        ), patch('processing.batch.update_batch', side_effect=update_batch):
             _refresh_batch("batch_test")
         self.assertEqual(saved["status"], "retry_wait")
         self.assertIsNone(saved["finished_at"])
@@ -74,10 +74,10 @@ class BatchStatusTests(unittest.TestCase):
             item.update(status="retry_wait", error_kind="transient", last_error="文件被其他任务占用")
         def update_batch(batch_id, values):
             self.batch.update(values)
-        with patch("batch_processor.get_batch", return_value=self.batch), patch(
-            "batch_processor.get_batch_items", return_value=items
-        ), patch("batch_processor.update_batch", side_effect=update_batch), patch(
-            "batch_processor._process_item", side_effect=process_item
+        with patch('processing.batch.get_batch', return_value=self.batch), patch(
+            'processing.batch.get_batch_items', return_value=items
+        ), patch('processing.batch.update_batch', side_effect=update_batch), patch(
+            'processing.batch._process_item', side_effect=process_item
         ):
             status = run_batch("batch_test")
         self.assertEqual(status["batch"]["status"], "retry_wait")
@@ -90,8 +90,8 @@ class BatchStatusTests(unittest.TestCase):
         self.batch.update(status="succeeded", finished_at=finished)
         def update_batch(batch_id, values):
             self.batch.update(values)
-        with patch("batch_processor.get_batch", return_value=self.batch), patch(
-            "batch_processor.get_batch_items", return_value=[{"status": "succeeded"}]
-        ), patch("batch_processor.update_batch", side_effect=update_batch):
+        with patch('processing.batch.get_batch', return_value=self.batch), patch(
+            'processing.batch.get_batch_items', return_value=[{"status": "succeeded"}]
+        ), patch('processing.batch.update_batch', side_effect=update_batch):
             _refresh_batch("batch_test")
         self.assertEqual(self.batch["finished_at"], finished)

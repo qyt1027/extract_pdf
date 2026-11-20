@@ -1,3 +1,5 @@
+> 历史记录：以下为当时的设计或实施计划，保留原文与旧代码路径供追溯；不代表当前实现或真实数据质量验收。现有入口及状态见 [制度知识研究说明](../../research/policy-knowledge.md) 和 [历史索引](../../research/policy-knowledge-history.md)。
+
 # 通用办事流程知识图谱实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.

@@ -1,7 +1,8 @@
 # parsers/base.py
 from abc import ABC, abstractmethod
-from typing import Optional, List
-from models import ContentBlock, MinerUTaskStatus
+from typing import Optional
+
+from core.models import MinerUTaskStatus
 
 
 class ParserStrategy(ABC):

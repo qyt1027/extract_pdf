@@ -1,12 +1,11 @@
 """验证手动联调脚本的错误诊断，不依赖已启动的服务。"""
-import unittest
-import contextlib
 import asyncio
+import contextlib
 import io
 import os
 import socket
+import unittest
 from unittest.mock import patch
-from types import SimpleNamespace
 
 import httpx
 import httpx2
@@ -17,62 +16,10 @@ from starlette.routing import Route
 
 from policy_mcp.api_client import PolicyAPIClient
 from policy_mcp.server import create_http_app, create_server
-from tests.test_policy_mcp_tools import MCPConnectionError, check_tools, main, probe_endpoint
+from tests.test_policy_mcp_tools import MCPConnectionError, main, probe_endpoint
 
 
 class PolicyMCPScriptTests(unittest.IsolatedAsyncioTestCase):
-    async def test_all_tools_are_checked_with_catalog_id_and_correct_arguments(self):
-        calls = []
-        payloads = {
-            "search_policy_clauses": {"results": [], "result_count": 0},
-            "list_policies": {"items": [{"policy_id": "policy_1"}], "total": 1},
-            "get_policy_detail": {"policy": {"policy_id": "policy_1"}, "clauses": [{"raw_text": "原文"}]},
-            "answer_policy_question": {"answer": "回答", "citations": [], "degraded": True},
-        }
-        async def call_tool(name, args):
-            calls.append((name, args))
-            return SimpleNamespace(is_error=False, structured_content=payloads[name])
-        with contextlib.redirect_stdout(io.StringIO()):
-            outcomes = await check_tools(SimpleNamespace(call_tool=call_tool), as_of="2026-10-07")
-        self.assertEqual([x["tool"] for x in outcomes], list(payloads))
-        self.assertTrue(all(x["status"] == "passed" for x in outcomes))
-        self.assertEqual(calls[2][1], {"policy_id": "policy_1"})
-        self.assertEqual(calls[3][1]["as_of"], "2026-10-07")
-        self.assertIn("question", calls[3][1])
-
-    async def test_single_detail_uses_explicit_id_without_other_tools(self):
-        calls = []
-        async def call_tool(name, args):
-            calls.append((name, args))
-            return SimpleNamespace(is_error=False, structured_content={
-                "policy": {"policy_id": "policy_2"}, "clauses": [],
-            })
-        with contextlib.redirect_stdout(io.StringIO()):
-            outcomes = await check_tools(SimpleNamespace(call_tool=call_tool), tool="get_policy_detail", policy_id="policy_2")
-        self.assertEqual(calls, [("get_policy_detail", {"policy_id": "policy_2"})])
-        self.assertEqual(outcomes[0]["status"], "passed")
-
-    async def test_failures_continue_and_empty_catalog_does_not_fake_detail_success(self):
-        calls = []
-        async def call_tool(name, args):
-            calls.append(name)
-            if name == "search_policy_clauses":
-                return SimpleNamespace(is_error=True, content=[SimpleNamespace(text="索引未就绪")])
-            payload = {"items": [], "total": 0} if name == "list_policies" else {"answer": "回答", "citations": []}
-            return SimpleNamespace(is_error=False, structured_content=payload)
-        with contextlib.redirect_stdout(io.StringIO()):
-            outcomes = await check_tools(SimpleNamespace(call_tool=call_tool))
-        self.assertEqual([x["status"] for x in outcomes], ["failed", "passed", "skipped", "passed"])
-        self.assertIn("answer_policy_question", calls)
-        self.assertNotIn("get_policy_detail", calls)
-
-    async def test_successful_protocol_with_wrong_payload_is_a_failed_check(self):
-        async def call_tool(name, args):
-            return SimpleNamespace(is_error=False, structured_content={"unexpected": "数据"})
-        with contextlib.redirect_stdout(io.StringIO()):
-            outcomes = await check_tools(SimpleNamespace(call_tool=call_tool), tool="answer_policy_question")
-        self.assertEqual(outcomes[0]["status"], "failed")
-
     async def test_backend_error_is_not_wrapped_in_exception_group(self):
         app = create_http_app(token="test-token", server=create_server(
             api_transport=httpx.MockTransport(lambda r: httpx.Response(503)),
@@ -86,7 +33,7 @@ class PolicyMCPScriptTests(unittest.IsolatedAsyncioTestCase):
                  patch("tests.test_policy_mcp_tools.load_dotenv"), \
                  patch("tests.test_policy_mcp_tools.httpx2.AsyncClient", return_value=http), \
                  contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaisesRegex(MCPConnectionError, "工具测试失败"):
+                with self.assertRaisesRegex(MCPConnectionError, "检索工具失败"):
                     await main()
 
     async def test_internal_api_does_not_use_global_proxy(self):

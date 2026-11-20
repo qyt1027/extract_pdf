@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from policy.domain_catalog import load_process_domain_catalog
+from policy.graph.domain_catalog import load_process_domain_catalog
 
 
 class ProcessDomainCatalogTests(unittest.TestCase):

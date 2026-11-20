@@ -5,13 +5,18 @@ import uuid
 from itertools import combinations
 from typing import Any
 
-from models import ReviewItem
-from policy.storage import (
-    get_policy_clauses, get_policy_documents_for_batch, insert_review_item,
-    list_policy_document_relations, list_policy_family_candidates,
-    upsert_policy_family_candidate, storage, TABLE_POLICY_REVIEWS,
+from core.models import ReviewItem
+from .storage import (
+    TABLE_POLICY_REVIEWS,
+    get_policy_clauses,
+    get_policy_documents_for_batch,
+    insert_review_item,
+    list_policy_document_relations,
+    list_policy_family_candidates,
+    storage,
+    upsert_policy_family_candidate,
 )
-from policy.temporal import extract_effective_date, normalize_family_title
+from .temporal import extract_effective_date, normalize_family_title
 
 
 def apply_effective_date_governance(
@@ -138,7 +143,7 @@ def get_policy_governance_status(batch_id: str) -> dict[str, int]:
 
 def run_interactive_family_review(batch_id: str, reviewer: str, limit: int = 20) -> dict[str, int]:
     """在终端审核制度族候选。"""
-    from policy.storage import get_policy_documents_by_ids, review_policy_family_candidate
+    from .storage import get_policy_documents_by_ids, review_policy_family_candidate
 
     if not reviewer.strip():
         raise ValueError("审核人不能为空")

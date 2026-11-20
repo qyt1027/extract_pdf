@@ -1,12 +1,12 @@
 """验证通用语义重排及异常降级。"""
 import json
-import unittest
 import threading
+import unittest
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from policy.semantic_reranking import semantic_rerank_candidates, invalidate_semantic_rerank_cache
+from policy.semantic_reranking import invalidate_semantic_rerank_cache, semantic_rerank_candidates
 
 
 class SemanticRerankingTests(unittest.TestCase):
@@ -23,7 +23,7 @@ class SemanticRerankingTests(unittest.TestCase):
         ]
 
     def test_candidate_limit_bounds_model_input(self):
-        from config import app_config
+        from core.config import app_config
         with patch.object(app_config.answer_llm, "rerank_candidate_limit", 1), patch(
             "policy.semantic_reranking.call_rerank_llm", return_value=self.scores(90)
         ) as call:
@@ -44,7 +44,7 @@ class SemanticRerankingTests(unittest.TestCase):
         self.assertTrue(second[0]["rerank_cache_hit"])
 
     def test_changed_text_model_date_and_invalidation_do_not_reuse_cache(self):
-        from config import app_config
+        from core.config import app_config
         with patch("policy.semantic_reranking.call_rerank_llm", return_value=self.scores(0, 95)) as call:
             rows = self.candidates()
             semantic_rerank_candidates("问题", rows)
@@ -58,7 +58,7 @@ class SemanticRerankingTests(unittest.TestCase):
         self.assertEqual(call.call_count, 5)
 
     def test_cache_expiry_and_failure_retry(self):
-        from config import app_config
+        from core.config import app_config
         with patch.object(app_config.answer_llm, "rerank_cache_ttl_seconds", 10), patch(
             "policy.semantic_reranking.time.monotonic", return_value=0
         ) as clock, patch("policy.semantic_reranking.call_rerank_llm", return_value=self.scores(0, 95)) as call:
@@ -74,7 +74,7 @@ class SemanticRerankingTests(unittest.TestCase):
         self.assertEqual(result[0]["rerank_mode"], "semantic")
 
     def test_cache_capacity_evicts_least_recently_used_scores(self):
-        from config import app_config
+        from core.config import app_config
         with patch.object(app_config.answer_llm, "rerank_cache_max_entries", 1), patch(
             "policy.semantic_reranking.call_rerank_llm", return_value=self.scores(0, 95)
         ) as call:
@@ -175,14 +175,14 @@ class SemanticRerankingTests(unittest.TestCase):
         self.assertEqual([r["metadata"]["clause_id"] for r in ranked], ["a", "b"])
 
     def test_search_reranks_before_top_k_cutoff(self):
-        from config import app_config
+        from core.config import app_config
         from policy.retrieval import search_indexed_policy_clauses
         rows = self.candidates()
         for row in rows:
             row["rrf_score"] = row["score"]
         storage = SimpleNamespace(vector=SimpleNamespace(count_vectors=lambda name: 2))
         with (
-            patch("storage_adapter.storage", storage),
+            patch('storage.adapters.storage', storage),
             patch("policy.retrieval._encode_policy_clause_texts", return_value=[[1.0]]),
             patch.object(storage.vector, "search", return_value=rows, create=True),
             patch("policy.retrieval.search_policy_clauses_bm25", return_value=[]),

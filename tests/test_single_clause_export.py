@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+
 from policy.clause_export import export_file_clause_structure
 
 

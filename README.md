@@ -1,28 +1,353 @@
-# PDF 多模态提取入仓
+# 文件处理与制度问答
 
-## 外部 Agent 的 MCP 接入
+将 PDF、DOC、DOCX 文件解析、分类并存储，识别制度文档后按章、节、条、款、项保留原文结构。问答基于制度条款索引检索证据，返回可回查的制度名称、条款号、页码和原文；回答是初步判断，需要结合适用性和人工审核使用。
 
-新增 `policy_mcp` 服务，通过现有 HTTP API 提供条款检索、制度目录、全文读取和带引用问答。默认使用 Streamable HTTP，地址为 `http://127.0.0.1:8001/mcp`，HTTP 模式要求配置 `POLICY_MCP_TOKEN`。业务服务和 MCP 服务分别启动，详细配置及客户端示例见 [制度 MCP 使用说明](policy_mcp/README.md)。
-
-基于 cloudmineru + PostgreSQL(pgvector+JSONB) + MinIO 的 PDF 多模态提取 Pipeline。将一个 PDF 同时产出**文本向量、图片、关系表、键值文档**四种结构化产物。
-
-## 架构
-
-```
-PDF 上传 → cloudmineru 解析 → 分类决策(规则+LLM) → 多模态分流存储
-                                              ├─ 文本 → pgvector 向量索引
-                                              ├─ 图片 → MinIO 对象存储
-                                              ├─ 数据表 → PostgreSQL 关系表
-                                              └─ 表单   → PostgreSQL JSONB
-```
-
-## 环境要求
+## 环境与配置
 
 - Python 3.10+
 - PostgreSQL 14+（需安装 pgvector 扩展）
 - MinIO
 
-## 快速开始
+### 安装运行依赖
+
+```powershell
+cd D:\mycode\pycharm_project\extract_pdf
+.\.venv\Scripts\activate
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+配置从项目根目录 `.env` 读取，已设置的进程环境变量优先。解析、数据库和存储配置与问答模型分别配置；请将示例值替换为可用服务。
+
+### 服务配置
+
+设置以下环境变量连接真实服务：
+
+```powershell
+# cloudmineru API
+$env:CLOUDMINERU_API_URL = "https://your-host/api/v1"
+$env:CLOUDMINERU_API_KEY = "your-key"
+
+# 文件分类及研究抽取 LLM（OpenAI 兼容接口，模型按部署填写）
+$env:LLM_API_URL = "https://api.openai.com/v1"
+$env:LLM_API_KEY = "sk-xxx"
+$env:LLM_MODEL = "gpt-4o"
+
+# 制度问答 LLM（DeepSeek 官方 OpenAI 兼容接口）
+$env:ANSWER_LLM_API_URL = "https://api.deepseek.com"
+$env:ANSWER_LLM_API_KEY = "your-deepseek-key"
+$env:ANSWER_LLM_MODEL = "deepseek-flash"
+$env:ANSWER_LLM_THINKING = "false"
+
+# PostgreSQL
+$env:PG_HOST = "127.0.0.1"
+$env:PG_PORT = "5432"
+$env:PG_USER = "postgres"
+$env:PG_PASSWORD = "your-password"
+$env:PG_DATABASE = "pdf_warehouse"
+
+# MinIO
+$env:MINIO_ENDPOINT = "127.0.0.1:9000"
+$env:MINIO_ACCESS_KEY = "minioadmin"
+$env:MINIO_SECRET_KEY = "minioadmin"
+$env:MINIO_BUCKET_PDF = "pdfs"
+$env:MINIO_BUCKET_IMAGES = "images"
+
+```
+
+PostgreSQL 初始化：
+```sql
+CREATE DATABASE pdf_warehouse;
+\c pdf_warehouse
+CREATE EXTENSION vector;
+```
+
+嵌入模型通过 `EMBEDDING_MODEL` 配置（默认 `BAAI/bge-m3`），运行设备由 `EMBEDDING_DEVICE` 指定（默认 `cpu`）。首次加载需要已有模型缓存或能够下载模型；数据库需要 pgvector 扩展。解析接口、分类模型与问答模型是不同配置项，详细默认值见 [配置定义](core/config.py)。
+
+## 主线快速开始
+
+### 1. 批量导入文件
+
+```powershell
+python main.py --process-dir "D:\policies"
+```
+
+制度识别、条款结构化和条款索引同步随文件处理自动执行。数据库和嵌入模型正常时，无需再手动创建索引。记下输出的 `batch_id`，供后续维护使用。
+
+### 2. 启动服务
+
+```powershell
+python main.py
+# 也可使用既有 ASGI 入口
+uvicorn api:app --host 127.0.0.1 --port 8000
+```
+
+### 3. 打开制度问答
+
+打开 `http://127.0.0.1:8000/policy-qa` 提问，查看回答引用的原文。API 文档位于 `http://127.0.0.1:8000/docs`。默认 `python main.py --help` 显示这条主线，全部命令通过 `python main.py --help-all` 查看。
+
+索引同步失败时，结构化结果仍会保留，文件处理成功不代表索引一定成功。遇到索引未建立提示或历史数据缺少索引时，按本文最后的维护操作补建。
+
+## 文件处理与制度问答说明
+
+### 单文件与结构化输出
+
+```powershell
+python main.py --process "C:\path\to\your.pdf"
+```
+
+目录批处理和上传接口支持 `.pdf`、`.doc`、`.docx`。DOCX 使用本地解析器；真正的二进制 DOC 文件交给 CloudMinerU，需使用 `cloudmineru` 后端。部分学校网站下载的 `.doc` 实际是 MIME 封装的 HTML 网页归档，系统会按文件内容识别并在本地提取正文，无需 CloudMinerU；此类文件的章、条、项按提取后的段落解析。
+
+输出示例：
+```
+正在处理: C:\path\to\your.pdf
+
+处理结果:
+  文件 ID:    pdf_abc123def456...
+  状态:       done
+  总块数:     4
+  文本块:     1
+  图片:       1
+  数据表:     1
+  表单:       1
+  待审核表:   0
+  耗时:       0.85s
+```
+
+一份印发通知包含多个《制度名称》，且正文中能确认各制度独立标题及章节起点时，会自动拆成多份制度记录，共享源文件和通知文号。条款层级、效力识别、检索索引及废止关系分别归属各制度；单文件/批次导出和文件重置覆盖全部制度。第一份制度沿用原制度 ID，其余按源文件 ID 和制度标题生成 ID，重复处理相同文件不会新增重复制度。无法确认完整正文边界时保留单制度处理，不按引用书名猜测附件。
+
+已确认多份制度时，提取的源文件 metadata 通过 `policies` 数组返回各制度的 `title`、通知文号和来源页码，通知名称保存为 `notice_title`，源文件层不再用通知名充当制度 `title`。单制度文件仍使用原来的 `title` 字段。
+
+条款重组导出保留完整的“第几条／第几款”及章节标题，并包含适用单位、发布日期、生效日期、失效日期、效力状态、版本和解析质量。页码数值 `0` 不再转成空字符串：PDF 页码沿用解析器的零起点编号；DOCX 当前没有可靠物理分页，其默认 `0` 不能作为已核实的物理页码。普通括号说明和版本日期不会单独切成条款，原文也不额外添加“前言”字样。
+
+附件用独立 `appendix` 节点保留，其编号条目继续保留父子关系，正文末尾的生效或解释条款不会吞入附件表格。附件原文纳入条款检索、知识抽取和规范类型分类。已入库的错误边界必须重新处理原文件后才能修正，单独重新导出旧条款只能更新导出字段。
+
+制度元数据的 `applicable_unit` 是单位名称列表。`["全校"]` 表示全校，`[]` 表示范围未知。正文明确列出多个适用学院时，保留各学院名称。例如振华楼地下车库管理制度记录为 `["文学院", "历史学院", "哲学学院"]`。多个制度附件分别识别适用单位。
+
+条款索引包含制度标题和适用单位。明确询问某学院事项时，适用单位列表包含该学院或全校的制度可参与检索。没有明确单位的问题保留跨单位检索。制度库支持按适用单位搜索，列表、详情及引用显示已识别的单位。学院名称通过 `core/unit_aliases.json` 统一，问答支持其中配置的“计院”“外院”等简称。
+
+已有文件不会自动推断并回填适用单位，需要按文末的文件重置及重新处理流程更新元数据并同步索引；仅重建索引不会重新提取文件适用范围。
+
+问答服务启动时会预热本地向量模型（含一次编码）和 BM25 索引，预热结束后开始接受请求，避免首个问题承担初始化耗时。预热不调用 DeepSeek，不消耗问答接口 token；某阶段失败会记录警告，后续检索仍可重试。入库、重置后的索引刷新和缓存失效逻辑保持有效；每个服务进程分别预热，启动耗时会相应增加。
+
+批处理按文件 SHA256 去重，临时错误最多自动重试 3 次；状态、错误及解析器和模型版本保存在 PostgreSQL 中。
+
+目录批处理完成后，输入目录会自动生成 `batch_xxx_条款重组结果.json`，保留条款顺序、父条款 ID、章节路径、页码和原文，便于核查。
+
+### 上传与状态查询
+
+**上传 PDF：**
+```powershell
+curl -X POST http://127.0.0.1:8000/upload -F "file=@C:\path\to\your.pdf"
+```
+
+上传成功立即返回 HTTP `202`，而不是等待解析完成：
+
+```json
+{"file_id":"pdf_xxx","status":"pending","status_url":"/status/pdf_xxx"}
+```
+
+前端应轮询 `status_url` 或 `GET /status/{file_id}` 获取处理进度和最终结果。跨域前端默认可访问；生产环境建议以逗号分隔的域名列表设置 `CORS_ALLOW_ORIGINS`，例如 `https://app.example.com`。
+
+**查询状态：**
+```powershell
+curl http://127.0.0.1:8000/status/{file_id}
+```
+
+### 跨制度条款检索
+
+每条结果包含制度名称、文件名、具体条款号、章节路径、页码和原文证据；问答在这些可回查的条款上生成初步回答。
+
+新完成结构化的制度会自动尝试同步条款索引；已有制度需按批次重建。索引只纳入原文非空的条、款、项，编、章、节标题不作为检索结果。重建按制度记录状态，失败不会改写源条款。
+
+```http
+GET /policy-search?q=出差报销需要什么材料&top_k=5
+GET /policy-search?q=差旅住宿标准&top_k=10&as_of=2020-06-01
+```
+
+若索引尚未建立或没有可检索条款，`/policy-search` 返回 HTTP 409 和中文提示；问题为空返回 422；真实嵌入或数据库不可用返回 503。`/search` 检索共享表中的通用文本块：提供 `file_id` 时仅搜索该文件，省略时跨文件搜索；不能替代制度条款接口。
+
+完成首批索引后，从报销、差旅、采购等真实办事问题中准备至少 20 题，在 [检索验收模板](docs/policy-search-evaluation-template.csv) 中逐题填写期望条款 ID、Top-3/Top-5 是否命中和实际首位结果。模板不包含虚构制度或模拟检索结果；没有达到预期命中率前，不进入基于条款的办事流程或图谱推理阶段。
+
+### 基于制度证据的初步问答
+
+跨制度检索先合并向量和 BM25 候选，再复用问答模型对融合排名靠前的候选进行语义评分，默认最多 30 条，通过 `POLICY_SEMANTIC_RERANK_CANDIDATES` 可调整为 1 至 100 条。评分发生在最终结果截断和证据名额分配之前，不针对特定问法扩展关键词。效力未知的相关条款仍可引用并解释原文，同时提示待核实；明确不适用的条款继续排除。
+
+语义重排默认启用，可通过 `POLICY_SEMANTIC_RERANK_ENABLED=false` 关闭；`POLICY_SEMANTIC_RERANK_TIMEOUT_SECONDS` 默认 45 秒。缓存未命中时增加一次问答模型请求；模型不可用或评分不合法时保留混合召回排序并返回降级警告。只引用适用性待核实条款的回答不能给出确定结论。
+
+重排评分使用有容量上限的进程内缓存：`POLICY_SEMANTIC_RERANK_CACHE_TTL_SECONDS` 默认 600 秒，`POLICY_SEMANTIC_RERANK_CACHE_MAX_ENTRIES` 默认 256，任一设为 0 可禁用缓存。相同问题、日期、模型及有序候选内容复用评分，并合并相同的并发评分请求。缓存只保存评分，不保存回答或制度效力；条款、标题或结构版本变化会产生新缓存键，本进程入库更新、索引重建和重置也会清空缓存。重启后缓存为空，多进程各自缓存，其他进程的数据变更依靠候选内容变化识别。命中缓存仍会召回候选并实时判断效力，最终回答生成仍调用问答模型。
+
+`POST /policy-answer` 会从最多三份制度中选择最多八条相关条款，再使用独立的 `ANSWER_LLM_API_URL`、`ANSWER_LLM_API_KEY` 和 `ANSWER_LLM_MODEL` 配置生成带引用的初步回答。默认接入 DeepSeek 官方 API，不会改变制度抽取和表格分类继续使用的本地 Qwen：
+
+启动 API 服务后，可直接打开 `http://127.0.0.1:8000/policy-qa`。页面提供制度问答、条款检索、制度库与完整结构化条款、服务端历史会话和回答反馈。历史会话依赖当前浏览器的 HttpOnly Cookie；清除 Cookie 后不能恢复旧会话。制度效力为 `unknown` 时，页面显示“待核实”。
+
+面向页面的新接口包括 `GET /api/policies`（`q`、`status`、`limit`、`offset`）、`GET /api/policies/{policy_id}`、`POST/GET /api/conversations`、`GET/PATCH/DELETE /api/conversations/{conversation_id}`、`POST /api/conversations/{conversation_id}/messages` 和 `POST /api/messages/{message_id}/feedback`。问答消息接口使用 JSON 请求 `{ "question": "...", "as_of": "YYYY-MM-DD" }`，反馈使用 `{ "rating": "helpful" }` 或 `unhelpful`。完整设计取舍见 [前端实施说明](docs/policy-frontend-implementation.md)。
+
+```http
+POST /policy-answer
+Content-Type: application/json
+
+{
+  "question": "差旅住宿标准是否适用于校外专家？",
+  "as_of": "2026-09-16"
+}
+```
+
+未提供 `as_of` 时，系统只自动识别问题中的完整日期；模糊历史时间会要求补充具体日期，完全没有时间表达则按请求当天检索。模型只能引用服务端提供的证据编号，响应中的制度原文、条款编号和页码由服务端回填。
+
+该接口提供的是基于现有制度库的初步判断，不是正式审批或最终合规裁决。明确的符合、不符合和有条件符合结论都会标记 `requires_human_review=true`。没有明确适用证据、模型未配置、模型超时或输出无法校验时，接口返回 `undetermined` 和已检索原文，不会编造结论。
+
+### 时间检索与回答边界
+
+制度默认有效（`current`），缺失生效日期不补造；已确认废止标为 `invalid`，未解决的日期或效力冲突保留 `unknown`。未来生效或废止按查询日期判断；已确认废止但日期未知时，当前问答排除，历史查询保留待核实。
+
+发布日期优先取明确的“发布日期／发文日期／印发日期”标注，其次取机关落款或文首的独立日期行，再取最后一行有效的日期。末行日期允许带“修订”或“修订版”后缀，例如“二○○六年三月（修订）”提取为 `2006-03`。审议通过日期、正文引用日期和“报送某单位”等动作说明中的日期会被排除。日级日期保存为 `issue_date`（`YYYY-MM-DD`），月级日期保存为 `issue_month`（`YYYY-MM`），制度库按原文精度展示。文末独立日期与条款正文分离，原文件保留日期原文。
+
+生效日期 `effective_date` 支持“自／于／从某年某月某日起施行／实施／实行／执行／试行／生效”，也支持“自发布／印发／公布／颁布之日起实施”等相对表述。相对日期只有在日级发布日期已知时才能换算。只有年度或以会议通过为条件的表述保留待核实。
+
+归族候选来自已批准的废止关系和规范标题匹配，但废止关系本身不等于版本继承，必须人工确认。条款不单独保存有效期，而是继承所属 `policy_documents` 的 `effective_date` 与 `expiry_date`。
+
+普通检索保持原行为；只有提供 `as_of` 时才应用左闭右开的有效区间过滤。日期未知的制度不会被丢弃，但排在可证明适用的制度之后：
+
+```http
+GET /policy-search?q=差旅住宿标准&top_k=10
+GET /policy-search?q=差旅住宿标准&top_k=10&as_of=2020-06-01
+```
+
+时间检索实时读取 PostgreSQL 中的文档治理字段，无需因日期或制度族调整而重建向量索引。同一制度族在指定日期存在多个适用版本时，接口保留全部结果并返回重叠警告。
+
+## 其他接口与扩展
+
+### 通用文本与表格查询
+
+**语义检索：**
+```powershell
+curl "http://127.0.0.1:8000/search?q=学生成绩&file_id={file_id}&top_k=5"
+```
+
+**表格搜索与展示：**
+```powershell
+# 搜索表格目录：q 可匹配表格编号、表格名称或原始 PDF 文件名，并附带前 N 行预览
+curl "http://127.0.0.1:8000/tables/search?q=X010102&row_limit=100"
+
+# 单独读取一张表，返回 columns + rows + page，可直接渲染为表格
+curl "http://127.0.0.1:8000/tables/{file_id}/{block_id}/data?limit=100&offset=0"
+
+# 按列筛选：支持 contains、equals、gte、lte；filters 是 JSON 条件数组
+curl.exe -G "http://127.0.0.1:8000/tables/{file_id}/{block_id}/data" `
+  --data-urlencode 'filters=[{"column":"项目","operator":"contains","value":"Rcpy"}]'
+```
+
+`/search` 始终只返回文本检索结果，表格不会混入其中。新处理的表格会保存编号、名称、来源文件名、页码、列定义和存储位置。名称优先取 `table_caption`，为空时回退到同页相邻的标题文本（如 `X010102 经费数额`）。`/tables/{file_id}/{block_id}/data` 的响应固定包含 `columns`、`rows` 和 `page`，可直接渲染为独立表格；关系表内部行号和页码字段不会暴露。筛选列必须存在于该表目录，条件值使用参数化查询；历史表格需重新处理后才会进入搜索目录。
+
+### MCP 接入
+
+新增 `policy_mcp` 服务，通过现有 HTTP API 提供条款检索、制度目录、全文读取和带引用问答。默认使用 Streamable HTTP，地址为 `http://127.0.0.1:8001/mcp`，HTTP 模式要求配置 `POLICY_MCP_TOKEN`。业务服务和 MCP 服务分别启动，详细配置及客户端示例见 [制度 MCP 使用说明](policy_mcp/README.md)。
+
+### 文档版本治理与废止审核
+
+归族候选来自已批准的废止关系和规范标题匹配，但废止不等于版本继承，必须人工确认。条款继承所属制度的 `effective_date` 与 `expiry_date`，不单独保存有效期。
+
+PDF 条款结构化完成后，系统会从整份文本识别明确生效日期；已有生效日期不会被自动结果覆盖。历史批次无需重新解析 PDF，可执行：
+
+```powershell
+python main.py --backfill-policy-governance batch_xxxxxxxxxxxxxxxx
+python main.py --policy-governance-status batch_xxxxxxxxxxxxxxxx
+python main.py --review-policy-families batch_xxxxxxxxxxxxxxxx --family-reviewer 张三
+```
+
+使用 `--process` 或 `--process-dir` 解析制度 PDF 时，条款结构化完成后会自动检查明确的废止措辞。只有识别到候选才会显示来源制度、目标制度、日期、页码和证据，并提示输入 `y` 插入、`n` 跳过或 `q` 结束本次命令的后续询问。插入的候选状态仍为 `pending`，不会自动改变旧制度状态。
+
+如果被废止制度晚于来源制度入库，系统会在目标制度结构化后反向匹配历史未解析候选，并询问是否批准；确认后会回填 `target_policy_id`，同时把目标制度标记为 `invalid` 并写入已识别的失效日期。文号精确唯一匹配优先，标题规范化唯一匹配作为后备；歧义关系不会自动绑定。API 和批次恢复不会等待终端输入。
+
+也可以单独为已有结构化批次补录制度级候选；该命令保持自动插入全部候选，不调用大模型：
+
+```powershell
+# 从已结构化批次中提取废止关系候选
+python main.py --extract-policy-abolition-relations batch_xxxxxxxxxxxxxxxx
+
+# 查看候选的审核和目标解析状态
+python main.py --policy-abolition-relation-status batch_xxxxxxxxxxxxxxxx
+
+# 在终端审核待处理候选；默认最多显示 20 条
+python main.py --review-policy-abolition-relations batch_xxxxxxxxxxxxxxxx --abolition-reviewer 张三
+```
+
+只有同句中明确、直接连接“废止”谓词与 `《制度名》` 的表述才会产生候选；否定表述、跨句依据引用和“第…条/款/项”等局部废止不会被提取。未能唯一匹配旧制度、或未能识别废止日期的候选，都需要人工确认；终端审核可输入 `a` 通过、`r` 拒绝、`t` 指定目标制度并输入或保留日期后通过、`d` 指定日期并在目标未解析时输入目标制度后通过、`s` 跳过或 `q` 结束。只有审核通过，系统才会把已确认的目标制度标为失效并写入已确认的废止日期；已审核关系不能重复审核。
+
+## 开发与文档导航
+
+| 目录或入口 | 职责 |
+|------------|------|
+| `main.py` | 命令行及服务启动入口 |
+| `api.py` | ASGI 兼容入口，继续支持 `uvicorn api:app` |
+| `core/` | 环境配置、共享 Pydantic 模型和项目资源路径 |
+| `commands/` | 参数定义与校验、命令分发、终端执行与结果展示 |
+| `web/` | FastAPI 应用与 HTTP 接口 |
+| `processing/` | 文档主流程、批处理、文件重置、文本/图片/表格处理 |
+| `classification/` | 文档分类与三级表格分类 |
+| `storage/` | PostgreSQL/pgvector/JSONB、MinIO、文件溯源及表格目录查询 |
+| `parsers/` | 解析策略、解析调度及 CloudMinerU 客户端 |
+| `metadata/` | 学术文档、制度与表单的内容元数据抽取 |
+| `policy/` | 基础条款、检索问答、效力治理、共享存储、质量评估与 `llm.py` 客户端 |
+| `policy/graph/` | 实体关系抽取、人工审核、流程分流、投影及事项域资源 |
+| `policy/knowledge_v2/` | V2 断言逻辑、运行、审核、检索增强与抽样 |
+| `policy/clause_classification/` | 条款多标签分类逻辑、运行与复核 |
+| `policy_mcp/` | 独立的制度 MCP 服务 |
+| `scripts/` | 显式运行的 MinerU 手动联调工具 |
+| `examples/` | 独立运行的图表分析示例 |
+| `tests/` | unittest 自动回归测试及既有 MCP 手动联调脚本 |
+
+各模块使用功能目录下的新导入路径，例如 `from processing.pipeline import process_pdf`。
+旧根目录业务模块的 import 路径已迁移；三个既有启动方式保持不变。
+项目配置统一定位根目录 `.env`；命令行入口继续以项目根目录作为工作目录，处理和导出位置沿用原有规则。
+
+运行服务安装 `requirements.txt`；执行测试及手动工具安装开发依赖：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests
+```
+
+测试使用 unittest。真实 PostgreSQL/pgvector 集成测试需要显式配置 `POLICY_RETRIEVAL_TEST_DATABASE` 指向隔离测试库；未配置时跳过。
+
+MinerU 手动工具读取根目录 `.env` 中的 `MINERU_API_URL`、`MINERU_API_KEY`、`MINERU_MODEL`。
+图表示例读取 `CHART_API_URL`、`CHART_API_KEY`、`CHART_MODEL`。
+凭据不写在源码中；这些模块在导入和查看帮助时不会请求外部服务。
+
+```powershell
+# 查看参数，无外部请求
+python -m scripts.mineru_parse --help
+python -m scripts.mineru_probe --help
+python -m examples.chart_description --help
+
+# 显式运行时会调用所配置的外部服务
+python -m scripts.mineru_parse "D:\policies\sample.pdf"
+python -m scripts.mineru_probe
+python -m examples.chart_description "D:\images\chart.png" --context "图表说明"
+```
+
+研究方案与操作集中在 [制度知识研究说明](docs/research/policy-knowledge.md)，历次设计和实施计划见 [研究历史索引](docs/research/policy-knowledge-history.md)。各套方案保留用于比较，技术路线尚未确定；实现与单元测试不能代替真实制度数据的质量验收。
+
+## 维护操作
+
+### 批次与索引恢复
+
+新导入制度自动尝试创建条款索引；历史数据缺少索引或自动同步失败时，先恢复数据库、嵌入模型等依赖，再使用文件批次 ID 补建：
+
+```powershell
+python main.py --rebuild-policy-clause-index batch_xxxxxxxxxxxxxxxx
+```
+
+该命令会重新计算并替换该批次制度的条款向量，不必在每次正常导入后重复执行。它返回独立的索引运行 ID；只有已经创建了索引运行，才使用下面的索引状态和恢复命令。
+
+```powershell
+python main.py --batch-status batch_xxxxxxxxxxxxxxxx
+python main.py --resume-batch batch_xxxxxxxxxxxxxxxx
+python main.py --policy-clause-index-status policy_index_xxxxxxxxxxxxxxxx
+python main.py --resume-policy-clause-index policy_index_xxxxxxxxxxxxxxxx
+```
+
+批次恢复只处理未完成或到期重试文件；条款索引恢复只重试失败制度。索引运行 ID 由索引重建命令返回，不与文件批次 ID 混用。失败不会改写源条款。
 
 ### 清理目录内已入库文件并重新解析
 
@@ -66,399 +391,155 @@ python main.py --reset-folder "D:\policies\sample" --confirm-reset-folder --allo
 
 单文件 `--reset-file FILE_ID` 使用常规关联清理和效力重算逻辑。近期 PDF 批任务占用、制度结构化以及近期或无法核实过期的条款任务禁止重置。目录内任一文件清理失败会回滚整个目录的数据库变更；`--allow-shared-reset`、`--release-stale-reset` 和 `--purge-imported-data` 仅允许与 `--reset-folder` 配合使用。
 
-### 制度图谱三步上手
+```powershell
+# 单文件常规重置，然后按原路径重新处理
+python main.py --reset-file pdf_xxxxxxxxxxxxxxxx
+python main.py --process "D:\policies\sample.pdf"
+```
 
-如果你的目标是从制度 PDF 中抽取实体和关系，先走下面三步即可；不要先使用流程分流、条款索引或质量报告等进阶命令。
+
+### 通用文本共享表与旧数据迁移
+
+新处理的文件统一写入 `pdf_text_chunks`，每行保存一个文本块，主键为 `(file_id, chunk_id)`。
+文件内检索先按文件筛选后精确排序，全库检索使用 HNSW 余弦索引；制度条款的 `policy_clause_search` 保持独立。
+同一文件重复写入会在事务中替换原分块。共享表登记首次写入的模型名称和维度，后续不匹配会拒绝写入和检索；
+相同维度的不同模型也不能混用。模型名称应指向固定版本；原地替换模型权重前必须重建对应版本存储。
+数据库需安装支持 HNSW、`vector_dims` 和 `vector_norm` 的 pgvector（建议 0.8 或更新版本）。
+
+升级步骤：备份数据库，停止旧版服务和导入任务，在项目目录执行预检查，再迁移，最后启动新版服务。
+迁移期间不要运行文件导入、重置或旧版服务。升级代码不会自动运行迁移，尚未迁移的历史文本不会出现在新版 `/search` 中。
 
 ```powershell
-# 1. 批量导入 PDF/DOC/DOCX；命令结束后记下输出的 batch_id
-python main.py --process-dir "D:\policies"
+# 只读预检查，不建表、不复制数据，也不加载嵌入模型
+python main.py --migrate-text-chunks --text-migration-dry-run
 
-# 2. 用 batch_id 抽取制度条款中的实体和关系；首次建议先验证 10 条
-python main.py --extract-policy-batch batch_xxxxxxxxxxxxxxxx --limit 10
-
-# 3. 用 policy_run_id 审核候选，并按需导出实体关系抽检表
-python main.py --review-policy-run policy_run_xxxxxxxxxxxxxxxx --reviewer 张三
-python main.py --export-policy-graph-review policy_run_xxxxxxxxxxxxxxxx --quality-output "D:\policy_quality"
+# 正式迁移，由操作者执行
+python main.py --migrate-text-chunks
 ```
 
-第 1 步完成后，输入目录会自动生成 `batch_xxx_条款重组结果.json`；其中保留每份制度的条款顺序、父条款 ID、章节路径、页码和原文，便于直接核查。
+命令逐文件输出 `ready`（预检查通过）、`migrated`（迁移完成）、`skipped`（已有新写入或迁移记录）、`empty`（空源表）及 `errors`。
+存在失败项时退出码为 1；成功文件已经提交，修复失败原因后重复运行同一命令即可继续。
+每个文件在独立事务中复制并双向核对分块 ID、正文元数据和向量，更新溯源位置后登记完成；失败会回滚该文件。
+相同 ID、相同内容和向量的重复行会合并并报告 `duplicates_removed`；同 ID 内容冲突、维度混乱、空向量、文件归属异常会拒绝迁移。
+旧表保留，不重新上传 PDF、解析文件或计算向量，也不改动制度条款索引。
 
-一份印发通知包含多个《制度名称》，且正文中能确认各制度独立标题及章节起点时，会自动拆成多份制度记录，共享源文件和通知文号。条款层级、效力识别、检索索引及废止关系分别归属各制度；单文件/批次导出和文件重置覆盖全部制度。第一份制度沿用原制度 ID，其余按源文件 ID 和制度标题生成 ID，重复处理相同文件不会新增重复制度。无法确认完整正文边界时保留单制度处理，不按引用书名猜测附件。
-
-已确认多份制度时，提取的源文件 metadata 通过 `policies` 数组返回各制度的 `title`、通知文号和来源页码，通知名称保存为 `notice_title`，源文件层不再用通知名充当制度 `title`。单制度文件仍使用原来的 `title` 字段。
-
-问答服务启动时会预热本地向量模型（含一次编码）和 BM25 索引，预热结束后开始接受请求，避免首个问题承担初始化耗时。预热不调用 DeepSeek，不消耗问答接口 token；某阶段失败会记录警告，后续检索仍可重试。入库、重置后的索引刷新和缓存失效逻辑保持有效；每个服务进程分别预热，启动耗时会相应增加。
-
-每一步的输出 ID 都是下一步的输入：PDF 导入产生 `batch_id`，实体关系抽取产生 `policy_run_id`。命令行默认帮助也只显示这条路径：
+如果旧文件没有 `embedding_model` 记录，命令会报错。必须先核实其真实模型，再明确声明，例如：
 
 ```powershell
-python main.py --help
+python main.py --migrate-text-chunks --text-migration-dry-run --legacy-embedding-model "BAAI/bge-m3"
+python main.py --migrate-text-chunks --legacy-embedding-model "BAAI/bge-m3"
 ```
 
-需要办事流程图谱、断点恢复、条款检索或质量报告时，再查看完整命令分类：
+该声明只补足缺失记录，不能覆盖已记录的不同模型；只凭维度相同不足以证明模型一致。
+保留的旧表只反映迁移前内容；新版产生新数据后，回退旧版须使用备份或另外迁回，不能直接认为旧表仍然同步。
+
+隔离数据库集成验证：设置 `TEXT_MIGRATION_TEST_DATABASE` 为名称为 `test`、`test_*` 或 `*_test` 的独立库，
+连接参数使用现有 `PG_*` 配置，库中须预装 pgvector，并允许创建测试 schema，然后运行：
 
 ```powershell
-python main.py --help-all
+python -B -m unittest tests.test_shared_text tests.test_text_migration_integration
 ```
 
-### 1. 安装依赖
+测试仅在随机命名的测试 schema 内建表，结束后清理；未设置独立测试库时集成测试跳过。
+
+
+### 同标题、同文号的重复导入确认
+
+导入制度时，若已完成入库的其他文件存在相同标题和文号，命令行会列出新旧文件名、标题和文号，并询问是否继续。
+标题忽略排版空白，文号统一括号、空白及顺序号格式；两个字段都明确且同时一致才触发。不同格式的 PDF、DOC、DOCX 同样核对。
+同一个 `file_id` 自身重跑不触发本提示；缺失标题或文号时不猜测重复。
+
+- 输入 `y`：继续入库，保留两份来源及各自制度、条款和向量，不覆盖旧文件。
+- 回车或输入 `n`：跳过当前重复制度。同一文件内的其他重复制度分别询问，未重复的制度正常入库。全部制度被跳过时，文件标记为 `skipped`。
+- 输入 `q` 或终端无法读取输入：暂停当前文件的入库，文件和批次任务标记为 `pending_confirmation`。恢复时重新核对该文件的制度。
+
+单文件、目录导入以及 `--resume-batch` 均支持此提示。待确认的目录任务可在交互终端运行：
 
 ```powershell
-cd D:\mycode\pycharm_project\extract_pdf
-.\.venv\Scripts\activate
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+python main.py --resume-batch BATCH_ID
 ```
 
-### 2. 命令行处理文档
+单文件待确认时，在交互终端重新执行原来的 `--process` 命令即可再次核对。后台上传接口不会读取终端输入，
+遇到重复也会停在待确认状态，通过 `/status/{file_id}` 查看原因；需要在终端处理原文件以作出选择。
+本次只提供标题、文号核对与是否入库确认，不计算正文相似度。同一源文件包含多项制度时，任一项重复均确认整个文件。
+文件注册记录及已上传的原始来源仍保留，便于追踪跳过和待确认状态；已有数据库重复数据不会被自动合并或删除。
 
-```powershell
-python main.py --process "C:\path\to\your.pdf"
-```
 
-目录批处理和上传接口支持 `.pdf`、`.doc`、`.docx`。真正的 Word 文件直接交给 CloudMinerU，不进行本地 PDF 转换；使用 Word 文件时解析后端必须为 `cloudmineru`。部分学校网站下载的 `.doc` 实际是 MIME 封装的 HTML 网页归档，系统会按文件内容识别并在本地提取正文，无需 CloudMinerU；此类文件的章、条、项按提取后的段落解析。
+### 学院官方名称与多个简称
 
-输出示例：
-```
-正在处理: C:\path\to\your.pdf
-
-处理结果:
-  文件 ID:    pdf_abc123def456...
-  状态:       done
-  总块数:     4
-  文本块:     1
-  图片:       1
-  数据表:     1
-  表单:       1
-  待审核表:   0
-  耗时:       0.85s
-```
-
-### 3. 启动 FastAPI 服务
-
-```powershell
-python main.py
-```
-
-访问 http://127.0.0.1:8000/docs 查看 API 文档。
-
-**上传 PDF：**
-```powershell
-curl -X POST http://127.0.0.1:8000/upload -F "file=@C:\path\to\your.pdf"
-```
-
-上传成功立即返回 HTTP `202`，而不是等待解析完成：
+`core/unit_aliases.json` 按“标准学院名 → 多个简称”维护，标准名以学校院系名称为准。
+配置示例（完整初版见下文链接）：
 
 ```json
-{"file_id":"pdf_xxx","status":"pending","status_url":"/status/pdf_xxx"}
-```
-
-前端应轮询 `status_url` 或 `GET /status/{file_id}` 获取处理进度和最终结果。跨域前端默认可访问；生产环境建议以逗号分隔的域名列表设置 `CORS_ALLOW_ORIGINS`，例如 `https://app.example.com`。
-
-**查询状态：**
-```powershell
-curl http://127.0.0.1:8000/status/{file_id}
-```
-
-**语义检索：**
-```powershell
-curl "http://127.0.0.1:8000/search?q=学生成绩&file_id={file_id}&top_k=5"
-```
-
-**表格搜索与展示：**
-```powershell
-# 搜索表格目录：q 可匹配表格编号、表格名称或原始 PDF 文件名，并附带前 N 行预览
-curl "http://127.0.0.1:8000/tables/search?q=X010102&row_limit=100"
-
-# 单独读取一张表，返回 columns + rows + page，可直接渲染为表格
-curl "http://127.0.0.1:8000/tables/{file_id}/{block_id}/data?limit=100&offset=0"
-
-# 按列筛选：支持 contains、equals、gte、lte；filters 是 JSON 条件数组
-curl.exe -G "http://127.0.0.1:8000/tables/{file_id}/{block_id}/data" `
-  --data-urlencode 'filters=[{"column":"项目","operator":"contains","value":"Rcpy"}]'
-```
-
-`/search` 始终只返回文本检索结果，表格不会混入其中。新处理的表格会保存编号、名称、来源文件名、页码、列定义和存储位置。名称优先取 `table_caption`，为空时回退到同页相邻的标题文本（如 `X010102 经费数额`）。`/tables/{file_id}/{block_id}/data` 的响应固定包含 `columns`、`rows` 和 `page`，可直接渲染为独立表格；关系表内部行号和页码字段不会暴露。筛选列必须存在于该表目录，条件值使用参数化查询；历史表格需重新处理后才会进入搜索目录。
-
-**批量处理与断点续跑：**
-
-```powershell
-# 递归处理目录中的全部 PDF，返回 batch_id
-python main.py --process-dir "D:\policies"
-
-# 中断后恢复未完成或到期重试的文件
-python main.py --resume-batch batch_xxxxxxxxxxxxxxxx
-
-# 只查看批次状态
-python main.py --batch-status batch_xxxxxxxxxxxxxxxx
-```
-
-批处理按文件 SHA256 去重，临时错误最多自动重试 3 次；批次和文件任务状态、错误信息以及解析器/模型版本保存在 PostgreSQL 中。
-
-**制度条款与实体关系抽取：**
-
-目录批处理识别为规章制度的 PDF 后，会自动写入制度文档和章/节/条/款/项层级的条款记录。条款结构化完成后，再手动启动实体关系抽取：
-
-```powershell
-# 为已完成的 PDF 批次创建一个新的抽取版本并执行
-python main.py --extract-policy-batch batch_xxxxxxxxxxxxxxxx
-
-# 先只抽取前 10 条实质性条款，验证结果和模型消耗
-python main.py --extract-policy-batch batch_xxxxxxxxxxxxxxxx --limit 10
-
-# 实体关系抽取中断后恢复
-python main.py --resume-policy-extraction policy_run_xxxxxxxxxxxxxxxx
-
-# 查看实体关系抽取状态
-python main.py --policy-extraction-status policy_run_xxxxxxxxxxxxxxxx
-
-# 在终端逐项审核 Qwen 候选；每次最多显示 20 条
-python main.py --review-policy-run policy_run_xxxxxxxxxxxxxxxx --reviewer 张三 --review-limit 20
-```
-
-未配置 LLM 时使用规则抽取；配置 LLM 后只采用模型候选。Qwen 等 LLM 候选默认进入人工审核。审核时输入 `a` 通过、`r` 拒绝、`c` 修正、`n` 补充、`s` 跳过或 `q` 结束。原始模型候选不会被覆盖，人工结论会写入 `policy_manual_annotations`，并保存原文证据的字符起止位置，后续可转换为 BERT 训练标注。制度默认为 `current`（默认有效），不补造缺失的生效日期。确认废止后标为 `invalid`；未解决的日期或效力冲突保留 `unknown`。未来生效或废止仍按查询日期判断；已确认废止但日期未知时，当前问答排除，历史查询保留待核实。
-
-**制度废止关系审核：**
-
-使用 `--process` 或 `--process-dir` 解析制度 PDF 时，条款结构化完成后会自动检查明确的废止措辞。只有识别到候选才会显示来源制度、目标制度、日期、页码和证据，并提示输入 `y` 插入、`n` 跳过或 `q` 结束本次命令的后续询问。插入的候选状态仍为 `pending`，不会自动改变旧制度状态。
-
-如果被废止制度晚于来源制度入库，系统会在目标制度结构化后反向匹配历史未解析候选，并询问是否批准；确认后会回填 `target_policy_id`，同时把目标制度标记为 `invalid` 并写入已识别的失效日期。文号精确唯一匹配优先，标题规范化唯一匹配作为后备；歧义关系不会自动绑定。API 和批次恢复不会等待终端输入。
-
-也可以单独为已有结构化批次补录制度级候选；该命令保持自动插入全部候选，不调用大模型：
-
-```powershell
-# 从已结构化批次中提取废止关系候选
-python main.py --extract-policy-abolition-relations batch_xxxxxxxxxxxxxxxx
-
-# 查看候选的审核和目标解析状态
-python main.py --policy-abolition-relation-status batch_xxxxxxxxxxxxxxxx
-
-# 在终端审核待处理候选；默认最多显示 20 条
-python main.py --review-policy-abolition-relations batch_xxxxxxxxxxxxxxxx --abolition-reviewer 张三
-```
-
-只有同句中明确、直接连接“废止”谓词与 `《制度名》` 的表述才会产生候选；否定表述、跨句依据引用和“第…条/款/项”等局部废止不会被提取。未能唯一匹配旧制度、或未能识别废止日期的候选，都需要人工确认；终端审核可输入 `a` 通过、`r` 拒绝、`t` 指定目标制度并输入或保留日期后通过、`d` 指定日期并在目标未解析时输入目标制度后通过、`s` 跳过或 `q` 结束。只有审核通过，系统才会把已确认的目标制度标为失效并写入已确认的废止日期；已审核关系不能重复审核。
-
-**跨制度条款检索（当前阶段目标）：**
-
-当前交付目标是：用户提出办事问题后，系统跨制度检索并展示可回查的条款，不生成“应该怎么办”的答案。每条结果固定包含制度名称、文件名、最具体条款号、章节路径、起止页码和原文证据。知识图谱、流程推理和冲突裁决仍保留为后续方向，现有条款、实体、关系和流程表不会删除。
-
-新完成结构化的制度会自动尝试同步自己的条款索引；已有制度需要对批次执行一次重建。索引只纳入原文非空的“条/款/项”，不把编、章、节标题作为检索结果。重建过程使用 PostgreSQL/pgvector 和配置的真实嵌入模型，按制度记录状态；失败不会改写源条款，也可单独恢复。
-
-```powershell
-# 1. 对已经完成 PDF 解析和制度条款结构化的批次建立全局条款索引
-python main.py --rebuild-policy-clause-index batch_xxxxxxxxxxxxxxxx
-
-# 2. 中断或失败后，只重试失败的制度
-python main.py --resume-policy-clause-index policy_index_xxxxxxxxxxxxxxxx
-
-# 3. 查看逐制度状态和失败原因
-python main.py --policy-clause-index-status policy_index_xxxxxxxxxxxxxxxx
-
-# 4. 启动 API 后，以办事问题跨制度查询；top_k 范围是 1 到 20
-curl "http://127.0.0.1:8000/policy-search?q=出差报销需要什么材料&top_k=5"
-```
-
-若索引尚未建立或没有可检索条款，`/policy-search` 返回 HTTP 409 和中文提示；问题为空返回 422；真实嵌入或数据库不可用返回 503。原有 `/search` 仍是按 `file_id` 检索通用文本块，不能替代此接口。
-
-完成首批索引后，从报销、差旅、采购等真实办事问题中准备至少 20 题，在 [检索验收模板](docs/policy-search-evaluation-template.csv) 中逐题填写期望条款 ID、Top-3/Top-5 是否命中和实际首位结果。模板不包含虚构制度或模拟检索结果；没有达到预期命中率前，不进入基于条款的办事流程或图谱推理阶段。
-
-**报销、差旅、采购流程图谱（首期试运行）：**
-
-这条路径用于先验证“哪些条款是办事流程”，再验证实体关系；它不会使用旧的全量抽取命令。每个当前条款都会被保留为 `process`、`non_process` 或 `pending`：只有同时命中三类事项与明确办事动作、并能回到原文证据的 `process` 条款，才会自动进入后续抽取。当前版本采用高精度规则；模糊条款保留为 `pending`，不会用大模型猜测性纳入图谱。
-
-```powershell
-# 1. 对一个已完成的制度批次创建流程条款分流运行；报销试点时显式收窄范围
-python main.py --classify-policy-process-batch batch_xxxxxxxxxxxxxxxx --policy-domains reimbursement
-
-# 2. 查看统计，或在中断后恢复失败条款
-python main.py --policy-process-status policy_process_xxxxxxxxxxxxxxxx
-python main.py --resume-policy-process policy_process_xxxxxxxxxxxxxxxx
-
-# 3. 导出流程分流抽检表，在 Excel 回填“分流正确、正确判定、错分原因、备注”
-python main.py --export-policy-process-review policy_process_xxxxxxxxxxxxxxxx --quality-output "D:\policy_quality"
-
-# 4. 只从已确认的流程条款抽取实体和关系；先限制 20 条做小样本验证
-python main.py --extract-policy-process-run policy_process_xxxxxxxxxxxxxxxx --limit 20
-
-# 5. 导出只包含流程来源候选的图谱抽检表
-python main.py --export-policy-process-graph-review policy_run_xxxxxxxxxxxxxxxx --quality-output "D:\policy_quality"
-
-# 6. 审核完成后导出可被前端或问答服务消费的办事流程图谱 JSON
-python main.py --export-policy-workflow-graph policy_run_xxxxxxxxxxxxxxxx --workflow-graph-output "D:\policy_quality\workflow_graph.json"
-
-# 7. 回填后生成报告；报告会包括流程分流正确/错误/待确认数和错分原因
-python main.py --report-policy-quality "D:\policy_quality"
-```
-
-导出目录中的 `流程条款抽检.csv` 用于判断“这条是否应该进入办事图谱”；`流程图谱抽检.csv` 用于判断“已入图的实体和关系是否有原文证据、是否遗漏”。办事流程图谱不是另一套事实库：它仅投影已通过的实体、关系和人工标注，每个节点和边都包含制度、条款、页码及连续原文证据；也可通过 `GET /policy-workflow-graph/{policy_run_id}` 获取同一份 JSON。总则、目的、解释权、施行日期和一般执行要求会留有 `non_process` 判定记录，不会被删除，也不会进入图谱。`pending` 条款默认不入图，待你在抽检中确认规则边界后再调整。
-
-**制度条款与图谱质量抽检：**
-
-质检工具不会更新制度、条款、实体、关系或既有人工审核结论。它只从数据库读取结果，导出可用 Excel 打开的 UTF-8 CSV；人工回填后再生成汇总报告。
-
-```powershell
-# 1. 从已完成的制度 PDF 批次中，为每份制度均匀抽取 10 条，导出条款抽检表和错误字典
-python main.py --export-policy-clause-review batch_xxxxxxxxxxxxxxxx --quality-output "D:\policy_quality"
-
-# 可按需调整为每份制度抽检 5 条
-python main.py --export-policy-clause-review batch_xxxxxxxxxxxxxxxx --quality-output "D:\policy_quality" --clauses-per-policy 5
-
-# 2. 从已完成的实体关系抽取运行中导出图谱候选抽检表
-python main.py --export-policy-graph-review policy_run_xxxxxxxxxxxxxxxx --quality-output "D:\policy_quality"
-
-# 3. 在 Excel 中回填“对/错”、错误类型、缺失内容和备注后，生成 Markdown 与 JSON 报告
-python main.py --report-policy-quality "D:\policy_quality"
-```
-
-导出目录会包含 `条款抽检.csv`、`图谱抽检.csv`、`错误字典.csv`；报告命令会新增 `质量报告.md` 与 `质量报告.json`。条款表核验边界、层级、文字和页码；图谱表核验实体/关系是否有原文证据。人工填写只保存在 CSV 中，系统原始结果不会被覆盖。
-
-## 文档级版本治理与时间检索
-
-PDF 条款结构化完成后，系统会从整份文本识别明确生效日期；已有生效日期不会被自动结果覆盖。历史批次无需重新解析 PDF，可执行：
-
-```powershell
-python main.py --backfill-policy-governance batch_xxxxxxxxxxxxxxxx
-python main.py --policy-governance-status batch_xxxxxxxxxxxxxxxx
-python main.py --review-policy-families batch_xxxxxxxxxxxxxxxx --family-reviewer 张三
-```
-
-归族候选来自已批准的废止关系和规范标题匹配，但废止关系本身不等于版本继承，必须人工确认。条款不单独保存有效期，而是继承所属 `policy_documents` 的 `effective_date` 与 `expiry_date`。
-
-普通检索保持原行为；只有提供 `as_of` 时才应用左闭右开的有效区间过滤。日期未知的制度不会被丢弃，但排在可证明适用的制度之后：
-
-```http
-GET /policy-search?q=差旅住宿标准&top_k=10
-GET /policy-search?q=差旅住宿标准&top_k=10&as_of=2020-06-01
-```
-
-时间检索实时读取 PostgreSQL 中的文档治理字段，无需因日期或制度族调整而重建向量索引。同一制度族在指定日期存在多个适用版本时，接口保留全部结果并返回重叠警告。
-
-### 基于制度证据的初步问答
-
-跨制度检索先合并向量和 BM25 候选，再复用问答模型对融合排名靠前的候选进行语义评分，默认最多 30 条，通过 `POLICY_SEMANTIC_RERANK_CANDIDATES` 可调整为 1 至 100 条。评分发生在最终结果截断和证据名额分配之前，不针对特定问法扩展关键词。效力未知的相关条款仍可引用并解释原文，同时提示待核实；明确不适用的条款继续排除。
-
-语义重排默认启用，可通过 `POLICY_SEMANTIC_RERANK_ENABLED=false` 关闭；`POLICY_SEMANTIC_RERANK_TIMEOUT_SECONDS` 默认 45 秒。缓存未命中时增加一次问答模型请求；模型不可用或评分不合法时保留混合召回排序并返回降级警告。只引用适用性待核实条款的回答不能给出确定结论。
-
-重排评分使用有容量上限的进程内缓存：`POLICY_SEMANTIC_RERANK_CACHE_TTL_SECONDS` 默认 600 秒，`POLICY_SEMANTIC_RERANK_CACHE_MAX_ENTRIES` 默认 256，任一设为 0 可禁用缓存。相同问题、日期、模型及有序候选内容复用评分，并合并相同的并发评分请求。缓存只保存评分，不保存回答或制度效力；条款、标题或结构版本变化会产生新缓存键，本进程入库更新、索引重建和重置也会清空缓存。重启后缓存为空，多进程各自缓存，其他进程的数据变更依靠候选内容变化识别。命中缓存仍会召回候选并实时判断效力，最终回答生成仍调用问答模型。
-
-`POST /policy-answer` 会从最多三份制度中选择最多八条相关条款，再使用独立的 `ANSWER_LLM_API_URL`、`ANSWER_LLM_API_KEY` 和 `ANSWER_LLM_MODEL` 配置生成带引用的初步回答。默认接入 DeepSeek 官方 API，不会改变制度抽取和表格分类继续使用的本地 Qwen：
-
-启动 API 服务后，可直接打开 `http://127.0.0.1:8000/policy-qa`。页面提供制度问答、条款检索、制度库与完整结构化条款、服务端历史会话和回答反馈。历史会话依赖当前浏览器的 HttpOnly Cookie；清除 Cookie 后不能恢复旧会话。制度效力为 `unknown` 时，页面显示“待核实”。
-
-面向页面的新接口包括 `GET /api/policies`（`q`、`status`、`limit`、`offset`）、`GET /api/policies/{policy_id}`、`POST/GET /api/conversations`、`GET/PATCH/DELETE /api/conversations/{conversation_id}`、`POST /api/conversations/{conversation_id}/messages` 和 `POST /api/messages/{message_id}/feedback`。问答消息接口使用 JSON 请求 `{ "question": "...", "as_of": "YYYY-MM-DD" }`，反馈使用 `{ "rating": "helpful" }` 或 `unhelpful`。完整设计取舍见 [前端实施说明](docs/policy-frontend-implementation.md)。
-
-```http
-POST /policy-answer
-Content-Type: application/json
-
 {
-  "question": "差旅住宿标准是否适用于校外专家？",
-  "as_of": "2026-09-16"
+  "外国语言文学学院": ["外语学院", "外院"],
+  "计算机学院": ["计院"]
 }
 ```
 
-未提供 `as_of` 时，系统只自动识别问题中的完整日期；模糊历史时间会要求补充具体日期，完全没有时间表达则按请求当天检索。模型只能引用服务端提供的证据编号，响应中的制度原文、条款编号和页码由服务端回填。
+可继续添加已核实的简称，同一简称不能指向两个学院，“本院”“各学院”等泛称不能配置为别名。
+不配置简称时建议写空列表 `[]`；空字符串或纯空白占位会被忽略，不会导致整张规则表失效。
+元数据提取或制度结构化发生异常时，会在终端打印具体原因并将文件标记为失败，停止该文件后续产物写入。
+标准学院名参考[武汉大学院系设置](https://www.whu.edu.cn/jgsz/yxsz.htm)；“外院”也用于学校图书馆的[二级单位资料室目录](https://www.lib.whu.edu.cn/engine2/general/more?appId=4069613&currentBranch=1&pageId=740716&typeId=10061334&websiteId=425039&wfwfid=25295)。
 
-该接口提供的是基于现有制度库的初步判断，不是正式审批或最终合规裁决。明确的符合、不符合和有条件符合结论都会标记 `requires_human_review=true`。没有明确适用证据、模型未配置、模型超时或输出无法校验时，接口返回 `undetermined` 和已检索原文，不会编造结论。
+新识别、写入的 `applicable_unit` 保存标准名，制度库列表、详情、检索结果与问答引用统一显示标准名。
+标题和证据原文保留原样。问答中的已配置简称先转为标准名，再进行向量与关键词检索、学院范围过滤；
+过滤时同时兼容旧记录及旧向量 metadata 中的简称。简称需位于明确名称上下文，例如“计院如何报销”“请问计院”“我在外院”，
+不会把“规划设计院”“校外院系”中的词内片段展开；未配置或无法明确识别的简称不作模糊猜测。
+修改规则表后重启服务或命令行进程，使进程缓存和 BM25 索引重新加载。
 
-## 条款义务、许可、禁止分类
-
-制度结构化完成后，可单独对正文非空的条、款、项执行多标签分类。明确的“应当、必须、可以、不得、严禁”等表述优先使用规则；规则无法确定时调用现有 `LLM_*` 配置的本地模型。模型不可用时任务会保留为失败状态，不会误标为“其他”。
-
-```powershell
-python main.py --classify-policy-clauses batch_xxxxxxxxxxxxxxxx
-python main.py --policy-clause-classification-status classification_run_xxxxxxxxxxxxxxxx
-python main.py --resume-policy-clause-classification classification_run_xxxxxxxxxxxxxxxx
-
-python main.py --export-policy-classification-review classification_run_xxxxxxxxxxxxxxxx --quality-output "D:\policy_quality"
-python main.py --import-policy-classification-review "D:\policy_quality\条款分类复核.csv" --classification-reviewer 张三
-```
-
-一条条款可同时属于义务、许可和禁止；“其他”不能与这三类同时出现。复核表最多导出 50 条，人工填写“是否正确”，错误时在“修正标签”中用顿号填写，例如 `义务、禁止`。导入后会生成 `条款分类质量报告.json`，统计多标签完全一致率以及三类标签各自的精确率和召回率。人工标签与系统原始结果分开保存，后续使用时人工结论优先。
-
-**制度知识抽取 V2（推荐试运行）：**
-
-V2 不再把条款级 `process/non_process` 作为抽取入口，而是从全部实质性条款中抽取带连续原文证据的制度断言，再从明确的章、节或父条款结构中聚合办事事项并派生流程视图。旧实体关系和流程图谱链路继续保留，便于同批数据对比。
+已入库字段可单独统一，不需要重新上传或解析文件。以下命令只更新制度主记录 `applicable_unit`，
+不改标题、正文，不重算向量；旧向量字段在读取时兼容标准名，后续重建索引时会写入标准名。
 
 ```powershell
-# 创建并执行 V2 抽取，输出 knowledge_v2_run_id
-python main.py --extract-policy-knowledge-v2 batch_xxxxxxxxxxxxxxxx
+# 先预览各旧名称将统一为什么名称，不修改数据库
+python main.py --normalize-applicable-units --unit-normalization-dry-run
 
-# 查看状态或恢复失败条款
-python main.py --policy-knowledge-v2-status knowledge_v2_run_xxxxxxxxxxxxxxxx
-python main.py --resume-policy-knowledge-v2 knowledge_v2_run_xxxxxxxxxxxxxxxx
-
-# 导出、回填并导入断言抽样复核表
-python main.py --export-policy-knowledge-v2-review knowledge_v2_run_xxxxxxxxxxxxxxxx --knowledge-v2-output "D:\policy_quality\V2断言复核.csv"
-python main.py --import-policy-knowledge-v2-review "D:\policy_quality\V2断言复核.csv" --knowledge-v2-reviewer 张三
-
-# 导出事项与流程视图
-python main.py --export-policy-knowledge-v2-view knowledge_v2_run_xxxxxxxxxxxxxxxx --knowledge-v2-output "D:\policy_quality\V2事项流程.json"
+# 确认预览结果后执行，可重复运行
+python main.py --normalize-applicable-units
 ```
 
-V2 默认将同一制度的 4 条目标条款合并为一次模型请求，并在批量响应失败时自动回退为逐条抽取。可在 `.env` 中通过 `KNOWLEDGE_V2_BATCH_SIZE=4` 调整批大小；本地 7B 模型建议使用 2～6，过大会增加 JSON 截断概率。`KNOWLEDGE_V2_MAX_TOKENS=2400` 控制每次批量响应上限。`KNOWLEDGE_V2_CONTEXT_ANCESTOR_DEPTH=1` 控制提供给模型的上级条款层数：0 不提供，1 仅直接父条款，2 再包含祖父条款；层数越高，提示词越长。新运行创建时会固定该值，修改配置不会影响已有运行的断点续跑。运行期间会持续输出完成数、平均耗时和预计剩余时间。
+命令在一个事务中更新，失败回滚，完成后重启正在运行的服务。
+此命令只转换已有单位字段，不会为单位未知的空值猜测学院，也不会自动合并其他制度记录。
 
-对“学校公文种类包括：”下的“（一）决议。适用于……”等明确列表，V2 逐项生成用途断言，并保留父条款中的“学校公文种类”及其条款 ID；复核 CSV 会显示“所属类别”和“类别来源条款ID”。这类列表项不调用模型，避免把用途说明误当成办事动作。导出的事项流程 JSON 另含 `document_type_graph`：同一父条款的“学校公文种类 → 包含 → [决议、决定、请示……]”合并为一条关系，每个成员附原文条款证据；“请示 → 适用于 → 向上级单位请求指示、批准”等用途关系仍逐项保留。该汇聚视图从已保存的断言派生，旧运行无需重新抽取即可重新导出。
 
-模型结果只有通过类型、端点、证据条款、连续原文及字符位置校验后才会以 `machine_extracted` 状态参与检索增强；`rejected`、`invalid` 结果不会参与。问答仍以条款向量召回为主，并且最终引用只包含原始条款。V2 断言索引不存在或服务失败时会自动退回原有条款检索。
+学院名称规则初版已根据官网院系目录扩展到43个单位、76个简称或名称写法，完整对照见
+[武汉大学院系名称映射初版](docs/reference/whu-unit-aliases.md)。官方目录提供标准名称，简称由本项目人工维护，
+并非学校公布的简称清单。没有明确简称的单位使用空列表，不将医院名、泛称或歧义简称自动映射。
+“弘毅学堂”“前沿交叉学科研究院”和带括号的医学、艺术单位，以及杜伦大学联合学院均按目录全称处理。
 
-## 服务配置
 
-设置以下环境变量连接真实服务：
+### 通用标题与通知信息
+
+`title` 是通用字段，不以“是否为通知”或“是否以办法、制度等词结尾”为前提。
+各类型的专用元数据提取会保留已确认的标题；缺失时从正文开头的独立标题兜底，再采用可信的源文件名。
+识别时跳过常见机构文头、文号、日期、编号正文及已标记的页眉页脚。临时或哈希文件名不能作为有效标题；
+确实没有可靠线索时使用明确的“未命名文档”占位，不把正文编号段落硬当标题。
+`notice_title` 只对“关于印发《……》的通知”类印发通知生成（兼容机构前缀、修订印发及分段标题）。
+普通公务用车、接待等通知以及发布、颁布、公布、执行类通知只保留通用 `title`，不生成 `notice_title`。
+字段条件与多制度正文拆分独立：发布类含多项完整制度时仍分别保存，不能因为不填 `notice_title` 就合并条款。
+一份文件确认包含多项独立制度时，各项分别保留标题，聚合元数据不挑选其中一个作为整个文件的标题。
+恢复展示文件名时保留原始 PDF/DOC/DOCX 扩展名。上述修改不自动回填已入库记录。
+
+
+### 旧文本表出现 chunk_id 冲突时
+
+若迁移报告“同一 chunk_id 的内容或向量冲突”，不要直接保留最新一行或给重复 ID 改名：旧表可能混入不同分块策略的多次处理结果。
+原文件仍在时，可仅为该文件重建共享文本向量，不运行 `--reset-file`：
 
 ```powershell
-# cloudmineru API
-$env:CLOUDMINERU_API_URL = "https://your-host/api/v1"
-$env:CLOUDMINERU_API_KEY = "your-key"
-
-# 制度抽取和表格分类 LLM（当前为本地 Qwen，OpenAI 兼容）
-$env:LLM_API_URL = "https://api.openai.com/v1"
-$env:LLM_API_KEY = "sk-xxx"
-$env:LLM_MODEL = "gpt-4o"
-
-# 制度问答 LLM（DeepSeek 官方 OpenAI 兼容接口）
-$env:ANSWER_LLM_API_URL = "https://api.deepseek.com"
-$env:ANSWER_LLM_API_KEY = "your-deepseek-key"
-$env:ANSWER_LLM_MODEL = "deepseek-flash"
-$env:ANSWER_LLM_THINKING = "false"
-
-# PostgreSQL
-$env:PG_HOST = "127.0.0.1"
-$env:PG_PORT = "5432"
-$env:PG_USER = "postgres"
-$env:PG_PASSWORD = "your-password"
-$env:PG_DATABASE = "pdf_warehouse"
-
-# MinIO
-$env:MINIO_ENDPOINT = "127.0.0.1:9000"
-$env:MINIO_ACCESS_KEY = "minioadmin"
-$env:MINIO_SECRET_KEY = "minioadmin"
-
+python main.py --rebuild-file-text FILE_ID
 ```
 
-PostgreSQL 初始化：
-```sql
-CREATE DATABASE pdf_warehouse;
-\c pdf_warehouse
-CREATE EXTENSION vector;
+命令优先从历史批次找到原文件，并要求其 SHA256 与原文件记录完全一致；路径变更时可显式指定：
+
+```powershell
+python main.py --rebuild-file-text FILE_ID --text-source "D:\policies\原文件.docx"
 ```
 
-## 项目结构
-
-| 文件 | 职责 |
-|------|------|
-| `config.py` | 全局配置（环境变量） |
-| `models.py` | 数据模型（Pydantic） |
-| `pdf_parser.py` | cloudmineru API 封装 |
-| `classifier.py` | 三级表格分类（规则+LLM+人工） |
-| `storage_adapter.py` | PG+pgvector+JSONB + MinIO 统一存储 |
-| `text_pipeline.py` | 文本分块 → Embedding → pgvector |
-| `image_pipeline.py` | 图片提取 → 过滤 → MinIO |
-| `table_pipeline.py` | 表格解析 → 关系表 / JSONB |
-| `table_catalog.py` | 表格标题目录 → 安全搜索与数据展示 |
-| `metadata_service.py` | 元数据/溯源 |
-| `policy/` | 制度领域包：条款结构化、跨制度检索、索引运行、流程分流、实体关系抽取、人工审核与质量抽检 |
-| `pipeline.py` | 主流程编排 |
-| `api.py` | FastAPI REST 接口 |
-| `main.py` | 启动入口 |
+执行前停止服务及导入任务。此命令会重新解析这一份文件并计算文本向量，只替换该文件的共享文本、更新其文本溯源位置。
+旧向量表、制度元数据、条款、审核及其他文件的数据保留。当前模型必须与已有模型记录一致；不会绕过共享表模型/维度校验。
+源文件在解析前后均核对 SHA256；写入事务内再次复核文件状态和更新时间，防止处理期间重置或修改后将旧结果写回。
+向量替换、迁移接管标记和溯源更新在同一事务中提交，失败回滚。
+成功后，原迁移命令会将这份文件标记为 `skipped`，不再把冲突旧表复制进共享表；可以继续迁移其他文件。
+这不是给冲突旧记录自动选版本：新文本直接来自同一 SHA256 的原文件，因此不混合历史分块。

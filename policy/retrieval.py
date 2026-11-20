@@ -7,6 +7,8 @@ from typing import Any
 
 import jieba
 from rank_bm25 import BM25Okapi
+from metadata.policy_scope import query_applicable_units
+from core.unit_aliases import applicable_unit_paths, normalize_applicable_units, normalize_unit_query
 
 
 _bm25_documents: list[dict[str, Any]] = []
@@ -42,7 +44,7 @@ def rebuild_policy_clause_bm25_index() -> int:
         tokenized_corpus.append(tokens)
 
     new_index = BM25Okapi(tokenized_corpus) if tokenized_corpus else None
-    from policy.semantic_reranking import invalidate_semantic_rerank_cache
+    from .semantic_reranking import invalidate_semantic_rerank_cache
     invalidate_semantic_rerank_cache()
     with _bm25_lock:
         _bm25_documents = usable_documents
@@ -54,7 +56,7 @@ def rebuild_policy_clause_bm25_index() -> int:
 def invalidate_policy_clause_bm25_index() -> None:
     """使进程内 BM25 索引失效，下一次查询时按最新条款重新加载。"""
     global _bm25_documents, _bm25_index, _bm25_index_ready
-    from policy.semantic_reranking import invalidate_semantic_rerank_cache
+    from .semantic_reranking import invalidate_semantic_rerank_cache
     invalidate_semantic_rerank_cache()
     with _bm25_lock:
         _bm25_documents = []
@@ -70,7 +72,7 @@ def _get_bm25_index_snapshot() -> tuple[BM25Okapi | None, list[dict[str, Any]]]:
         return _bm25_index, list(_bm25_documents)
 
 
-_SEARCHABLE_LEVELS = frozenset({"article", "paragraph", "item"})
+_SEARCHABLE_LEVELS = frozenset({"article", "paragraph", "item", "appendix"})
 _QUERY_PUNCTUATION = re.compile(r"[^\u4e00-\u9fffA-Za-z0-9]+")
 POLICY_CLAUSE_INDEX_NAME = "policy_clause_search"
 
@@ -91,12 +93,16 @@ def is_searchable_policy_clause(clause: dict[str, Any]) -> bool:
     )
 
 
-def build_clause_index_text(clause: dict[str, Any]) -> str:
-    """组合章节、条款号和原文，给向量模型保留制度上下文。"""
+def build_clause_index_text(clause: dict[str, Any], document: dict[str, Any] | None = None) -> str:
+    """组合制度标题、适用单位和条款内容，原文证据保持独立。"""
     chapter_path = clause.get("chapter_path") or []
     if not isinstance(chapter_path, list):
         chapter_path = []
-    parts = [str(item).strip() for item in chapter_path if str(item).strip()]
+    document = document or {}
+    title = str(document.get("title") or "").strip()
+    parts = [title] if title else []
+    parts.extend(normalize_applicable_units(document.get("applicable_unit")))
+    parts.extend(str(item).strip() for item in chapter_path if str(item).strip())
     parts.extend(
         str(clause.get(field) or "").strip()
         for field in ("article_no", "paragraph_no", "item_no")
@@ -120,6 +126,7 @@ def build_clause_metadata(
         "file_id": str(document.get("file_id") or ""),
         "file_name": str(document.get("file_name") or ""),
         "title": str(document.get("title") or document.get("file_name") or ""),
+        "applicable_unit": normalize_applicable_units(document.get("applicable_unit")),
         "level": str(clause.get("level") or ""),
         "parent_clause_id": clause.get("parent_clause_id"),
         "article_no": str(clause.get("article_no") or ""),
@@ -129,13 +136,31 @@ def build_clause_metadata(
         "page_start": int(clause.get("page_start") or 0),
         "page_end": int(clause.get("page_end") or clause.get("page_start") or 0),
         "raw_text": str(clause.get("raw_text") or ""),
-        "search_text": build_clause_index_text(clause),
+        "search_text": build_clause_index_text(clause, document),
         "structure_version": str(clause.get("structure_version") or ""),
     }
 
 
 def _normalize_query(text: str) -> str:
     return _QUERY_PUNCTUATION.sub("", str(text or "")).lower()
+
+
+def filter_candidates_by_applicable_unit(
+    query: str, candidates: list[dict[str, Any]], known_units: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """明确询问学院时保留对应学院及全校制度，未知范围不能当作全校。"""
+    def units_of(candidate: dict[str, Any]) -> list[str]:
+        document = candidate.get("policy_document") or {}
+        metadata = candidate.get("metadata") or {}
+        return normalize_applicable_units(document.get("applicable_unit", metadata.get("applicable_unit")))
+
+    candidate_units = [units_of(candidate) for candidate in candidates]
+    units = {unit for units in candidate_units for unit in units} | (known_units or set())
+    targets = query_applicable_units(query, units)
+    if not targets:
+        return list(candidates)
+    allowed = targets | {"全校"}
+    return [candidate for candidate, units in zip(candidates, candidate_units) if allowed.intersection(units)]
 
 
 def _query_terms(query: str) -> set[str]:
@@ -164,7 +189,7 @@ def _keyword_score(query: str, search_text: str) -> float:
 def search_policy_clauses_bm25(
     query: str, top_k: int = 50,
 ) -> list[dict[str, Any]]:
-    query = str(query or "").strip()
+    query = normalize_unit_query(str(query or "").strip())
     if not query:
         raise ValueError("检索问题不能为空")
     if not 1 <= top_k <= 100:
@@ -179,8 +204,10 @@ def search_policy_clauses_bm25(
         return []
 
     scores = index.get_scores(query_tokens)
+    eligible = filter_candidates_by_applicable_unit(query, documents)
+    eligible_ids = {id(document) for document in eligible}
     top_indices = sorted(
-        range(len(scores)),
+        (index for index, document in enumerate(documents) if id(document) in eligible_ids),
         key=lambda index: (float(scores[index]), -index),
         reverse=True,
     )[:top_k]
@@ -284,6 +311,7 @@ def build_policy_search_response(
     for rank, candidate in enumerate(candidates, start=1):
         metadata = dict(candidate.get("metadata") or {})
         document = dict(candidate.get("policy_document") or {})
+        units = normalize_applicable_units(document.get("applicable_unit", metadata.get("applicable_unit")))
         results.append({
             "rank": rank,
             "score": float(candidate.get("score", candidate.get("similarity", 0.0)) or 0.0),
@@ -296,6 +324,8 @@ def build_policy_search_response(
                 "file_id": str(metadata.get("file_id") or ""),
                 "title": str(metadata.get("title") or ""),
                 "file_name": str(metadata.get("file_name") or ""),
+                "applicable_unit": units,
+                "applicable_unit_paths": applicable_unit_paths(units),
                 "family_id": str(document.get("family_id") or ""),
                 "effective_date": str(document.get("effective_date") or ""),
                 "expiry_date": str(document.get("expiry_date") or ""),
@@ -327,7 +357,7 @@ def _encode_policy_clause_texts(texts: list[str]) -> list[list[float]]:
     """使用项目配置的真实嵌入模型生成条款向量。"""
     if not texts:
         return []
-    from text_pipeline import _get_embedding_model
+    from processing.text import _get_embedding_model
 
     model = _get_embedding_model()
     encoded = model.encode(texts, normalize_embeddings=True)
@@ -339,8 +369,8 @@ def sync_policy_clause_index(policy_id: str) -> int:
     if not str(policy_id or "").strip():
         raise ValueError("policy_id 不能为空")
 
-    from policy.storage import get_policy_clauses, get_policy_document
-    from storage_adapter import storage
+    from .storage import get_policy_clauses, get_policy_document
+    from storage.adapters import storage
 
     document = get_policy_document(policy_id=policy_id)
     if not document:
@@ -349,7 +379,7 @@ def sync_policy_clause_index(policy_id: str) -> int:
         clause for clause in get_policy_clauses(policy_id)
         if is_searchable_policy_clause(clause)
     ]
-    texts = [build_clause_index_text(clause) for clause in clauses]
+    texts = [build_clause_index_text(clause, document) for clause in clauses]
     metadata = [build_clause_metadata(clause, document) for clause in clauses]
 
     # 先完成真实嵌入，避免模型故障时提前删除可用的旧索引。
@@ -397,7 +427,7 @@ def _should_process_index_item(item: dict[str, Any], resume: bool) -> bool:
 def run_policy_clause_index(run_id: str, resume: bool = False) -> dict[str, Any]:
     """运行或恢复一次批量条款索引，逐制度记录真实写入结果。"""
     from datetime import datetime
-    from policy.storage import (
+    from .storage import (
         get_policy_clause_index_items,
         get_policy_clause_index_run,
         refresh_policy_clause_index_run,
@@ -441,8 +471,8 @@ def run_policy_clause_index(run_id: str, resume: bool = False) -> dict[str, Any]
 
 def create_and_run_policy_clause_index(batch_id: str) -> dict[str, Any]:
     """使用当前版本快照创建并执行一个批次的条款索引。"""
-    from batch_processor import current_processing_versions
-    from policy.storage import create_policy_clause_index_run
+    from processing.batch import current_processing_versions
+    from .storage import create_policy_clause_index_run
 
     run_id = create_policy_clause_index_run(batch_id, current_processing_versions())
     return run_policy_clause_index(run_id)
@@ -450,10 +480,7 @@ def create_and_run_policy_clause_index(batch_id: str) -> dict[str, Any]:
 
 def get_policy_clause_index_status(run_id: str) -> dict[str, Any]:
     """查看索引运行及逐制度处理状态，不执行重建。"""
-    from policy.storage import (
-        get_policy_clause_index_items,
-        get_policy_clause_index_run,
-    )
+    from .storage import get_policy_clause_index_items, get_policy_clause_index_run
 
     run = get_policy_clause_index_run(run_id)
     if not run:
@@ -463,12 +490,8 @@ def get_policy_clause_index_status(run_id: str) -> dict[str, Any]:
 
 def load_policy_clauses_for_bm25() -> list[dict[str, Any]]:
     """读取当前结构版本的可引用条款，并组装 BM25 所需的完整 metadata。"""
-    from policy.storage import (
-        TABLE_POLICY_CLAUSES,
-        TABLE_POLICY_DOCUMENTS,
-        ensure_policy_tables,
-    )
-    from storage_adapter import storage
+    from .storage import TABLE_POLICY_CLAUSES, TABLE_POLICY_DOCUMENTS, ensure_policy_tables
+    from storage.adapters import storage
 
     ensure_policy_tables()
     clause_rows = storage.relational.query(
@@ -502,35 +525,8 @@ def load_policy_clauses_for_bm25() -> list[dict[str, Any]]:
         ):
             continue
 
-        chapter_path = clause.get("chapter_path") or []
-        if not isinstance(chapter_path, list):
-            chapter_path = []
-        search_text = str(clause.get("search_text") or "").strip()
-        if not search_text:
-            search_text = build_clause_index_text(clause)
-        metadata = {
-            "clause_id": str(clause.get("clause_id") or ""),
-            "policy_id": policy_id,
-            "file_id": str(policy_document.get("file_id") or ""),
-            "file_name": str(policy_document.get("file_name") or ""),
-            "title": str(
-                policy_document.get("title")
-                or policy_document.get("file_name")
-                or ""
-            ),
-            "level": str(clause.get("level") or ""),
-            "article_no": str(clause.get("article_no") or ""),
-            "paragraph_no": str(clause.get("paragraph_no") or ""),
-            "item_no": str(clause.get("item_no") or ""),
-            "chapter_path": list(chapter_path),
-            "page_start": int(clause.get("page_start") or 0),
-            "page_end": int(
-                clause.get("page_end") or clause.get("page_start") or 0
-            ),
-            "raw_text": str(clause.get("raw_text") or ""),
-            "search_text": search_text,
-            "structure_version": str(clause.get("structure_version") or ""),
-        }
+        metadata = build_clause_metadata(clause, policy_document)
+        search_text = metadata["search_text"]
         documents.append({
             "clause_id": metadata["clause_id"],
             "search_text": search_text,
@@ -644,7 +640,7 @@ def rrf_fusion(
 
 def attach_clause_hierarchy_context(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """为命中条款补充同一活动版本的祖先与后代原文，不拼接改写条款。"""
-    from policy.storage import get_policy_clauses
+    from .storage import get_policy_clauses
     loaded = {}
     results = []
     for candidate in candidates:
@@ -689,13 +685,13 @@ def search_indexed_policy_clauses(
     query: str, top_k: int = 10, as_of: str | None = None
 ) -> list[dict[str, Any]]:
     """在全局真实条款索引中召回并重排可引用的制度条款。"""
-    query = str(query or "").strip()
+    query = normalize_unit_query(str(query or "").strip())
     if not query:
         raise ValueError("检索问题不能为空")
     if not 1 <= top_k <= 20:
         raise ValueError("top_k 必须在 1 到 20 之间")
 
-    from storage_adapter import storage
+    from storage.adapters import storage
 
     try:
         if storage.vector.count_vectors(POLICY_CLAUSE_INDEX_NAME) < 1:
@@ -728,6 +724,11 @@ def search_indexed_policy_clauses(
             top_k=candidate_top_k,
         )
 
+        with _bm25_lock:
+            known_units = {unit for row in _bm25_documents
+                           for unit in normalize_applicable_units((row.get("metadata") or {}).get("applicable_unit"))}
+        vector_candidates = filter_candidates_by_applicable_unit(query, vector_candidates, known_units)
+        bm25_candidates = filter_candidates_by_applicable_unit(query, bm25_candidates, known_units)
         candidates = rrf_fusion(
             vector_candidates,
             bm25_candidates,
@@ -744,14 +745,14 @@ def search_indexed_policy_clauses(
         100,
         use_fusion_score=True,
     )
-    from config import app_config
+    from core.config import app_config
     if app_config.answer_llm.rerank_enabled:
-        from policy.semantic_reranking import semantic_rerank_candidates
+        from .semantic_reranking import semantic_rerank_candidates
         ranked = semantic_rerank_candidates(query, ranked, cache_context=as_of or "")
     if as_of is None:
         return attach_clause_hierarchy_context(ranked[:top_k])
-    from policy.storage import get_policy_documents_by_ids
-    from policy.temporal import rank_temporal_candidates
+    from .storage import get_policy_documents_by_ids
+    from .temporal import rank_temporal_candidates
 
     policy_ids = [str((item.get("metadata") or {}).get("policy_id") or "") for item in ranked]
     temporal, warnings = rank_temporal_candidates(

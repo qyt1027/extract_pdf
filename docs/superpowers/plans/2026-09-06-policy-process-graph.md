@@ -1,3 +1,5 @@
+> 历史记录：以下为当时的设计或实施计划，保留原文与旧代码路径供追溯；不代表当前实现或真实数据质量验收。现有入口及状态见 [制度知识研究说明](../../research/policy-knowledge.md) 和 [历史索引](../../research/policy-knowledge-history.md)。
+
 # 报销、差旅、采购流程图谱 Implementation Plan
 
 > **For agentic workers:** 按任务顺序实施；每个生产功能必须先写失败测试，再写最小实现并验证。当前用户要求先自行测试，实施完成后不得自动提交、合并或推送。

@@ -36,6 +36,7 @@ Thumbs.db
 *.log
 /tmp/
 /outputs/
+/evaluation_results/
 *_条款重组结果.json
 
 # 本地原始资料与抽样导出，仅忽略项目根目录对应文件

@@ -1,14 +1,14 @@
 """解析扩展名为 DOC、实际内容为网页归档的学校制度文件。"""
 from __future__ import annotations
 
+import re
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
-import re
 
 from bs4 import BeautifulSoup
 
-from models import BlockType, ContentBlock
+from core.models import BlockType, ContentBlock
 
 
 def is_mhtml_document(data: bytes) -> bool:

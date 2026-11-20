@@ -3,8 +3,8 @@ import argparse
 import asyncio
 import json
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import httpx2
 from dotenv import load_dotenv

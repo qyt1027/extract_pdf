@@ -35,7 +35,7 @@ class PolicyWarmupTests(unittest.TestCase):
         self.assertEqual(result['bm25']['status'], 'failed')
 
     def test_app_startup_waits_for_warmup(self):
-        from api import app
+        from web.api import app
         result = {'embedding': {'status': 'ready'}, 'bm25': {'status': 'ready'}}
         async def run():
             async with app.router.lifespan_context(app):

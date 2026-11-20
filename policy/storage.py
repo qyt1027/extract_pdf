@@ -10,27 +10,23 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from models import (
-    PolicyAnnotationDecision,
+from core.models import (
     PolicyCandidateKind,
     PolicyClause,
-    PolicyDocument,
     PolicyDocumentRelation,
-    PolicyDocumentRelationType,
     PolicyEntity,
     PolicyExtractionItemStatus,
-    PolicyExtractionRun,
     PolicyExtractionStatus,
+    PolicyManualAnnotation,
     PolicyRelation,
     PolicyReviewStatus,
     PolicyStructureStatus,
     PolicyValidityStatus,
-    PolicyManualAnnotation,
     ProcessingVersion,
     ReviewItem,
 )
-from policy.process import is_process_label_eligible
-from storage_adapter import storage
+from storage.adapters import storage
+from policy.graph.process import is_process_label_eligible
 
 
 TABLE_POLICY_DOCUMENTS = "policy_documents"
@@ -70,7 +66,7 @@ def ensure_policy_tables() -> None:
         return
 
     # 先确保现有 pdf_files 和批任务表存在，便于建立外键和按批次查找。
-    from metadata_service import _ensure_meta_tables
+    from storage.file_records import _ensure_meta_tables
 
     _ensure_meta_tables()
     storage.relational.execute(
@@ -89,7 +85,9 @@ def ensure_policy_tables() -> None:
             title TEXT NOT NULL DEFAULT '',
             doc_number TEXT NOT NULL DEFAULT '',
             issuing_department TEXT NOT NULL DEFAULT '',
+            applicable_unit TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
             issue_date DATE,
+            issue_month VARCHAR(7),
             effective_date DATE,
             expiry_date DATE,
             validity_status VARCHAR(20) NOT NULL DEFAULT 'current'
@@ -106,13 +104,44 @@ def ensure_policy_tables() -> None:
     )
     storage.relational.execute(
         f'ALTER TABLE "{TABLE_POLICY_DOCUMENTS}" ADD COLUMN IF NOT EXISTS '
+        '"applicable_unit" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]'
+    )
+    # 就地转换开发库中的单值字段，保留原有制度的适用范围。
+    storage.relational.execute(
+        f'''DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_attribute
+                WHERE attrelid = '"{TABLE_POLICY_DOCUMENTS}"'::regclass
+                  AND attname = 'applicable_unit' AND atttypid = 'text'::regtype
+            ) THEN
+                LOCK TABLE "{TABLE_POLICY_DOCUMENTS}" IN ACCESS EXCLUSIVE MODE;
+                IF EXISTS (
+                    SELECT 1 FROM pg_attribute
+                    WHERE attrelid = '"{TABLE_POLICY_DOCUMENTS}"'::regclass
+                      AND attname = 'applicable_unit' AND atttypid = 'text'::regtype
+                ) THEN
+                    ALTER TABLE "{TABLE_POLICY_DOCUMENTS}" ALTER COLUMN applicable_unit DROP DEFAULT;
+                    ALTER TABLE "{TABLE_POLICY_DOCUMENTS}" ALTER COLUMN applicable_unit TYPE TEXT[]
+                        USING CASE WHEN btrim(applicable_unit) = '' THEN ARRAY[]::TEXT[]
+                                   ELSE ARRAY[applicable_unit] END;
+                    ALTER TABLE "{TABLE_POLICY_DOCUMENTS}" ALTER COLUMN applicable_unit
+                        SET DEFAULT ARRAY[]::TEXT[];
+                END IF;
+            END IF;
+        END;
+        $$'''
+    )
+    storage.relational.execute(
+        f'ALTER TABLE "{TABLE_POLICY_DOCUMENTS}" ADD COLUMN IF NOT EXISTS '
         f'"family_id" VARCHAR(96) REFERENCES "{TABLE_POLICY_FAMILIES}"(family_id)'
     )
     # 原单制度记录使用空键，保持已有 ID；同一文件的其他制度独立使用稳定键。
     storage.relational.execute(f'''ALTER TABLE "{TABLE_POLICY_DOCUMENTS}"
         ADD COLUMN IF NOT EXISTS document_key TEXT NOT NULL DEFAULT '',
         ADD COLUMN IF NOT EXISTS source_page_start INTEGER,
-        ADD COLUMN IF NOT EXISTS source_page_end INTEGER''')
+        ADD COLUMN IF NOT EXISTS source_page_end INTEGER,
+        ADD COLUMN IF NOT EXISTS issue_month VARCHAR(7)''')
     storage.relational.execute(f'ALTER TABLE "{TABLE_POLICY_DOCUMENTS}" DROP CONSTRAINT IF EXISTS policy_documents_file_id_key')
     storage.relational.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS policy_documents_file_document_key_idx '
                                f'ON "{TABLE_POLICY_DOCUMENTS}" (file_id, document_key)')
@@ -558,6 +587,7 @@ def ensure_policy_tables() -> None:
               ON target."policy_id" = relation."target_policy_id"'''
     )
     for table, index, columns in (
+        (TABLE_POLICY_DOCUMENTS, "policy_documents_duplicate_title_idx", "regexp_replace(title, '[[:space:]]', '', 'g')"),
         (TABLE_POLICY_CLAUSES, "policy_clauses_policy_idx", "policy_id, sequence_no"),
         (TABLE_POLICY_DOCUMENT_RELATIONS, "policy_document_relations_source_idx", "source_policy_id, review_status"),
         (TABLE_POLICY_ITEMS, "policy_extraction_items_run_idx", "run_id, status"),
@@ -633,13 +663,15 @@ def upsert_policy_document(
     from metadata.document_number import display_document_number
     doc_number_raw = str(metadata.get("doc_number_raw") or metadata.get("doc_number") or "")
     original_pdf_url = str(metadata.get("original_pdf_url") or f"pdf/{file_id}.pdf")
+    issue_date = _parse_date(metadata.get("issue_date"))
+    from core.unit_aliases import normalize_applicable_units
     storage.relational.execute(
         f'''INSERT INTO "{TABLE_POLICY_DOCUMENTS}"
             (policy_id, file_id, file_name, title, notice_title, doc_number, doc_number_raw, issuing_department,
              issue_date, effective_date, expiry_date, validity_status, version,
              original_pdf_url, parse_quality, structure_status, structure_version,
-             document_key, source_page_start, source_page_end)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             document_key, source_page_start, source_page_end, applicable_unit, issue_month)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (file_id, document_key) DO UPDATE SET
                 file_name = EXCLUDED.file_name,
                 title = EXCLUDED.title,
@@ -647,7 +679,9 @@ def upsert_policy_document(
                 doc_number = EXCLUDED.doc_number,
                 doc_number_raw = EXCLUDED.doc_number_raw,
                 issuing_department = EXCLUDED.issuing_department,
+                applicable_unit = EXCLUDED.applicable_unit,
                 issue_date = EXCLUDED.issue_date,
+                issue_month = EXCLUDED.issue_month,
                 effective_date = CASE WHEN EXCLUDED.source_page_start IS NOT NULL THEN EXCLUDED.effective_date
                     ELSE COALESCE("{TABLE_POLICY_DOCUMENTS}".effective_date, EXCLUDED.effective_date) END,
                 expiry_date = CASE WHEN EXCLUDED.source_page_start IS NOT NULL THEN EXCLUDED.expiry_date
@@ -674,7 +708,7 @@ def upsert_policy_document(
             display_document_number(str(metadata.get("doc_number") or "")),
             doc_number_raw,
             str(metadata.get("issuer") or metadata.get("issuing_department") or ""),
-            _parse_date(metadata.get("issue_date")),
+            issue_date,
             _parse_date(metadata.get("effective_date")),
             _parse_date(metadata.get("expiry_date")),
             PolicyValidityStatus.CURRENT.value,
@@ -686,6 +720,8 @@ def upsert_policy_document(
             document_key,
             metadata.get("source_page_start"),
             metadata.get("source_page_end"),
+            normalize_applicable_units(metadata.get("applicable_unit")),
+            None if issue_date else metadata.get("issue_month") or None,
         ),
     )
     return policy_id
@@ -784,7 +820,7 @@ def replace_policy_clauses(
         (policy_id,),
     )
     try:
-        from policy.retrieval import invalidate_policy_clause_bm25_index
+        from .retrieval import invalidate_policy_clause_bm25_index
     except ImportError:
         # BM25 依赖缺失时不阻断条款结构化，正式部署应安装 requirements.txt 中的依赖。
         pass
@@ -903,7 +939,7 @@ def review_policy_family_candidate(
                 if not family_rows:
                     raise ValueError(f"指定制度族不存在: {family_id}")
             if not existing and not family_id:
-                from policy.temporal import normalize_family_title
+                from .temporal import normalize_family_title
 
                 default_title = (
                     candidate.get("normalized_title")
@@ -931,7 +967,7 @@ def review_policy_family_candidate(
 def get_policy_documents_for_batch(batch_id: str) -> list[dict[str, Any]]:
     """获取批次内已完成制度结构化的文档。"""
     ensure_policy_tables()
-    from metadata_service import get_batch_items
+    from storage.file_records import get_batch_items
 
     documents: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1144,7 +1180,7 @@ def review_policy_document_relation(
             target_document = lock_policy_document(str(resolved_target_policy_id))
             if not target_document:
                 raise ValueError(f"未找到目标制度: {resolved_target_policy_id}")
-            from policy.abolition import target_publication_year, document_publication_year
+            from .abolition import target_publication_year, document_publication_year
             expected_year = target_publication_year(str(relation.get("evidence_text") or ""),
                                                     str(relation.get("target_title") or ""))
             actual_year = document_publication_year(target_document)
@@ -1174,7 +1210,7 @@ def review_policy_document_relation(
             )
             # 废止不必然代表同一制度族，只生成待人工确认的归族候选。
             if relation.get("source_policy_id"):
-                from policy.temporal import normalize_family_title
+                from .temporal import normalize_family_title
 
                 upsert_policy_family_candidate(
                     str(relation["source_policy_id"]),
@@ -1402,7 +1438,7 @@ def create_policy_classification_run(
     schema_version: str,
 ) -> str:
     """为批次中的条、款、项创建独立分类运行。"""
-    from policy.classification_runner import select_classifiable_clauses
+    from policy.clause_classification.runner import select_classifiable_clauses
 
     ensure_policy_tables()
     run_id = f"classification_run_{uuid.uuid4().hex}"
@@ -2106,7 +2142,7 @@ def create_policy_knowledge_run_v2(
     context_ancestor_depth: int = 1,
 ) -> str:
     """为批次中的全部实质性条款创建独立 V2 抽取运行。"""
-    from policy.knowledge_v2 import is_substantive_clause
+    from policy.knowledge_v2.logic import is_substantive_clause
 
     ensure_policy_tables()
     documents = get_policy_documents_for_batch(batch_id)
@@ -2116,7 +2152,7 @@ def create_policy_knowledge_run_v2(
         if is_substantive_clause(clause)
     ]
     if sample_path:
-        from policy.knowledge_sampling_v2 import load_sample_ids
+        from policy.knowledge_v2.sampling import load_sample_ids
 
         selected_ids = set(load_sample_ids(sample_path, batch_id, clauses))
         clauses = [clause for clause in clauses if clause["clause_id"] in selected_ids]
@@ -2278,7 +2314,7 @@ def get_policy_assertion_review_rows_v2(run_id: str) -> list[dict[str, Any]]:
     for assertion in get_policy_assertions_v2(run_id):
         clause = get_policy_clause(str(assertion.get("clause_id") or "")) or {}
         if assertion.get("status") == "invalid" and not assertion.get("error"):
-            from policy.knowledge_v2 import validate_assertion
+            from policy.knowledge_v2.logic import validate_assertion
 
             policy_id = str(clause.get("policy_id") or "")
             if policy_id not in context_by_policy:

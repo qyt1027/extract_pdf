@@ -5,10 +5,10 @@
 """
 
 import re
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass, field
 
-from models import ContentBlock, BlockType
+from core.models import BlockType, ContentBlock
 
 
 # ============================================================

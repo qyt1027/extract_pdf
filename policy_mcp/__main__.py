@@ -2,14 +2,15 @@
 import argparse
 import os
 
-from dotenv import load_dotenv
 import uvicorn
+from dotenv import load_dotenv
 
+from core.paths import ENV_FILE
 from .server import create_http_app, create_server
 
 
 def main():
-    load_dotenv()
+    load_dotenv(ENV_FILE)
     parser = argparse.ArgumentParser(description="制度检索与问答 MCP 服务")
     parser.add_argument("transport", nargs="?", choices=["streamable-http", "stdio"], default="streamable-http")
     parser.add_argument("--host", default=os.getenv("POLICY_MCP_HOST", "127.0.0.1"))

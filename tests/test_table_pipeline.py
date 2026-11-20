@@ -22,9 +22,9 @@ for _key, _value in {
     os.environ.setdefault(_key, _value)
 
 
-import table_pipeline
-from config import app_config
-from models import BlockType, ContentBlock, TableCategory
+from processing import tables as table_pipeline
+from core.config import app_config
+from core.models import BlockType, ContentBlock, TableCategory
 
 
 class FormStorageTests(unittest.TestCase):

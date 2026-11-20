@@ -1,6 +1,6 @@
 """验证 MCP 参数转换、错误边界和协议调用，不访问真实数据库。"""
-import os
 import asyncio
+import os
 import socket
 import sys
 import unittest
@@ -9,10 +9,10 @@ from unittest.mock import patch
 
 import httpx
 import httpx2
-from mcp.client import Client
-from mcp.client.streamable_http import streamable_http_client
-from mcp.client.stdio import StdioServerParameters
 import uvicorn
+from mcp.client import Client
+from mcp.client.stdio import StdioServerParameters
+from mcp.client.streamable_http import streamable_http_client
 
 from policy_mcp.api_client import PolicyAPIClient, PolicyAPIError
 from policy_mcp.server import create_http_app, create_server
@@ -94,7 +94,7 @@ class PolicyMCPTests(unittest.IsolatedAsyncioTestCase):
         async with Client(server) as client:
             tools = await client.list_tools()
             self.assertEqual({t.name for t in tools.tools}, {
-                "search_policy_clauses", "list_policies", "get_policy_detail", "answer_policy_question",
+                "search_policy_clauses", "list_policies", "get_policy_detail", "answer_policy_question", "get_policy_relations",
             })
             self.assertNotIn("ctx", tools.tools[0].input_schema["properties"])
             result = await client.call_tool("search_policy_clauses", {"query": "奖学金"})
@@ -150,7 +150,7 @@ class PolicyMCPTests(unittest.IsolatedAsyncioTestCase):
                             "http://127.0.0.1:8001/mcp", http_client=http,
                         ), mode=mode) as client:
                             tools = await client.list_tools()
-                            self.assertEqual(len(tools.tools), 4)
+                            self.assertEqual(len(tools.tools), 5)
                             for name, args in [
                                 ("search_policy_clauses", {"query": "奖学金"}),
                                 ("list_policies", {}),
@@ -210,7 +210,7 @@ class PolicyMCPTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.status_code, 401)
                     http.headers["Authorization"] = "Bearer test-token"
                     async with Client(streamable_http_client(url, http_client=http)) as client:
-                        self.assertEqual(len((await client.list_tools()).tools), 4)
+                        self.assertEqual(len((await client.list_tools()).tools), 5)
                         result = await client.call_tool("search_policy_clauses", {"query": "奖学金"})
                         self.assertFalse(result.is_error)
                         self.assertEqual(result.structured_content, payload)
@@ -226,7 +226,7 @@ class PolicyMCPTests(unittest.IsolatedAsyncioTestCase):
         )
         async with asyncio.timeout(10):
             async with Client(params) as client:
-                self.assertEqual(len((await client.list_tools()).tools), 4)
+                self.assertEqual(len((await client.list_tools()).tools), 5)
 
     async def test_api_address_configuration_and_optional_dates(self):
         calls = []

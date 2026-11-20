@@ -22,7 +22,7 @@ for _key, _value in {
     os.environ.setdefault(_key, _value)
 
 
-import table_catalog
+from storage import table_catalog
 
 
 class _CatalogRelationalStorage:
